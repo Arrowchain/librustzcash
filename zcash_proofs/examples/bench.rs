@@ -1,11 +1,3 @@
-extern crate bellman;
-extern crate ff;
-extern crate pairing;
-extern crate rand_core;
-extern crate rand_xorshift;
-extern crate zcash_primitives;
-extern crate zcash_proofs;
-
 use bellman::groth16::*;
 use ff::Field;
 use pairing::bls12_381::{Bls12, Fr};
@@ -58,7 +50,7 @@ fn main() {
             nsk: nsk.clone(),
         };
 
-        let viewing_key = proof_generation_key.into_viewing_key(jubjub_params);
+        let viewing_key = proof_generation_key.to_viewing_key(jubjub_params);
 
         let payment_address;
 
@@ -69,7 +61,7 @@ fn main() {
                 Diversifier(d)
             };
 
-            if let Some(p) = viewing_key.into_payment_address(diversifier, jubjub_params) {
+            if let Some(p) = viewing_key.to_payment_address(diversifier, jubjub_params) {
                 payment_address = p;
                 break;
             }

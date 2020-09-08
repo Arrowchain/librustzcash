@@ -1,33 +1,139 @@
-extern crate ff;
-extern crate group;
-#[cfg(feature = "pairing")]
-extern crate pairing;
-extern crate rand_core;
+//! `bellman` is a crate for building zk-SNARK circuits. It provides circuit
+//! traits and and primitive structures, as well as basic gadget implementations
+//! such as booleans and number abstractions.
+//!
+//! # Example circuit
+//!
+//! Say we want to write a circuit that proves we know the preimage to some hash
+//! computed using SHA-256d (calling SHA-256 twice). The preimage must have a
+//! fixed length known in advance (because the circuit parameters will depend on
+//! it), but can otherwise have any value. We take the following strategy:
+//!
+//! - Witness each bit of the preimage.
+//! - Compute `hash = SHA-256d(preimage)` inside the circuit.
+//! - Expose `hash` as a public input using multiscalar packing.
+//!
+//! ```
+//! use bellman::{
+//!     gadgets::{
+//!         boolean::{AllocatedBit, Boolean},
+//!         multipack,
+//!         sha256::sha256,
+//!     },
+//!     groth16, Circuit, ConstraintSystem, SynthesisError,
+//! };
+//! use pairing::{bls12_381::Bls12, Engine};
+//! use rand::rngs::OsRng;
+//! use sha2::{Digest, Sha256};
+//!
+//! /// Our own SHA-256d gadget. Input and output are in little-endian bit order.
+//! fn sha256d<E: Engine, CS: ConstraintSystem<E>>(
+//!     mut cs: CS,
+//!     data: &[Boolean],
+//! ) -> Result<Vec<Boolean>, SynthesisError> {
+//!     // Flip endianness of each input byte
+//!     let input: Vec<_> = data
+//!         .chunks(8)
+//!         .map(|c| c.iter().rev())
+//!         .flatten()
+//!         .cloned()
+//!         .collect();
+//!
+//!     let mid = sha256(cs.namespace(|| "SHA-256(input)"), &input)?;
+//!     let res = sha256(cs.namespace(|| "SHA-256(mid)"), &mid)?;
+//!
+//!     // Flip endianness of each output byte
+//!     Ok(res
+//!         .chunks(8)
+//!         .map(|c| c.iter().rev())
+//!         .flatten()
+//!         .cloned()
+//!         .collect())
+//! }
+//!
+//! struct MyCircuit {
+//!     /// The input to SHA-256d we are proving that we know. Set to `None` when we
+//!     /// are verifying a proof (and do not have the witness data).
+//!     preimage: Option<[u8; 80]>,
+//! }
+//!
+//! impl<E: Engine> Circuit<E> for MyCircuit {
+//!     fn synthesize<CS: ConstraintSystem<E>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
+//!         // Compute the values for the bits of the preimage. If we are verifying a proof,
+//!         // we still need to create the same constraints, so we return an equivalent-size
+//!         // Vec of None (indicating that the value of each bit is unknown).
+//!         let bit_values = if let Some(preimage) = self.preimage {
+//!             preimage
+//!                 .into_iter()
+//!                 .map(|byte| (0..8).map(move |i| (byte >> i) & 1u8 == 1u8))
+//!                 .flatten()
+//!                 .map(|b| Some(b))
+//!                 .collect()
+//!         } else {
+//!             vec![None; 80 * 8]
+//!         };
+//!         assert_eq!(bit_values.len(), 80 * 8);
+//!
+//!         // Witness the bits of the preimage.
+//!         let preimage_bits = bit_values
+//!             .into_iter()
+//!             .enumerate()
+//!             // Allocate each bit.
+//!             .map(|(i, b)| {
+//!                 AllocatedBit::alloc(cs.namespace(|| format!("preimage bit {}", i)), b)
+//!             })
+//!             // Convert the AllocatedBits into Booleans (required for the sha256 gadget).
+//!             .map(|b| b.map(Boolean::from))
+//!             .collect::<Result<Vec<_>, _>>()?;
+//!
+//!         // Compute hash = SHA-256d(preimage).
+//!         let hash = sha256d(cs.namespace(|| "SHA-256d(preimage)"), &preimage_bits)?;
+//!
+//!         // Expose the vector of 32 boolean variables as compact public inputs.
+//!         multipack::pack_into_inputs(cs.namespace(|| "pack hash"), &hash)
+//!     }
+//! }
+//!
+//! // Create parameters for our circuit. In a production deployment these would
+//! // be generated securely using a multiparty computation.
+//! let params = {
+//!     let c = MyCircuit { preimage: None };
+//!     groth16::generate_random_parameters::<Bls12, _, _>(c, &mut OsRng).unwrap()
+//! };
+//!
+//! // Prepare the verification key (for proof verification).
+//! let pvk = groth16::prepare_verifying_key(&params.vk);
+//!
+//! // Pick a preimage and compute its hash.
+//! let preimage = [42; 80];
+//! let hash = Sha256::digest(&Sha256::digest(&preimage));
+//!
+//! // Create an instance of our circuit (with the preimage as a witness).
+//! let c = MyCircuit {
+//!     preimage: Some(preimage),
+//! };
+//!
+//! // Create a Groth16 proof with our parameters.
+//! let proof = groth16::create_random_proof(c, &params, &mut OsRng).unwrap();
+//!
+//! // Pack the hash as inputs for proof verification.
+//! let hash_bits = multipack::bytes_to_bits_le(&hash);
+//! let inputs = multipack::compute_multipacking::<Bls12>(&hash_bits);
+//!
+//! // Check the proof!
+//! assert!(groth16::verify_proof(&pvk, &proof, &inputs).unwrap());
+//! ```
+//!
+//! # Roadmap
+//!
+//! `bellman` is being refactored into a generic proving library. Currently it
+//! is pairing-specific, and different types of proving systems need to be
+//! implemented as sub-modules. After the refactor, `bellman` will be generic
+//! using the [`ff`] and [`group`] crates, while specific proving systems will
+//! be separate crates that pull in the dependencies they require.
 
-extern crate bit_vec;
-extern crate blake2s_simd;
-extern crate byteorder;
-extern crate futures;
-
-#[cfg(feature = "multicore")]
-extern crate crossbeam;
-#[cfg(feature = "multicore")]
-extern crate futures_cpupool;
-#[cfg(feature = "multicore")]
-extern crate num_cpus;
-
-#[cfg(test)]
-#[macro_use]
-extern crate hex_literal;
-
-#[cfg(test)]
-extern crate rand;
-
-#[cfg(test)]
-extern crate rand_xorshift;
-
-#[cfg(test)]
-extern crate sha2;
+// Catch documentation errors caused by code changes.
+#![deny(intra_doc_link_resolution_failure)]
 
 pub mod domain;
 pub mod gadgets;
@@ -42,7 +148,7 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 use std::marker::PhantomData;
-use std::ops::{Add, Sub};
+use std::ops::{Add, MulAssign, Neg, Sub};
 
 /// Computations are expressed in terms of arithmetic circuits, in particular
 /// rank-1 quadratic constraint systems. The `Circuit` trait represents a
@@ -109,10 +215,9 @@ impl<E: ScalarEngine> Add<(E::Fr, Variable)> for LinearCombination<E> {
 impl<E: ScalarEngine> Sub<(E::Fr, Variable)> for LinearCombination<E> {
     type Output = LinearCombination<E>;
 
-    fn sub(self, (mut coeff, var): (E::Fr, Variable)) -> LinearCombination<E> {
-        coeff.negate();
-
-        self + (coeff, var)
+    #[allow(clippy::suspicious_arithmetic_impl)]
+    fn sub(self, (coeff, var): (E::Fr, Variable)) -> LinearCombination<E> {
+        self + (coeff.neg(), var)
     }
 }
 
@@ -230,8 +335,8 @@ impl Error for SynthesisError {
 }
 
 impl fmt::Display for SynthesisError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        if let &SynthesisError::IoError(ref e) = self {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        if let SynthesisError::IoError(ref e) = *self {
             write!(f, "I/O error: ")?;
             e.fmt(f)
         } else {
@@ -296,7 +401,7 @@ pub trait ConstraintSystem<E: ScalarEngine>: Sized {
     fn get_root(&mut self) -> &mut Self::Root;
 
     /// Begin a namespace for this constraint system.
-    fn namespace<'a, NR, N>(&'a mut self, name_fn: N) -> Namespace<'a, E, Self::Root>
+    fn namespace<NR, N>(&mut self, name_fn: N) -> Namespace<'_, E, Self::Root>
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -309,7 +414,7 @@ pub trait ConstraintSystem<E: ScalarEngine>: Sized {
 
 /// This is a "namespaced" constraint system which borrows a constraint system (pushing
 /// a namespace context) and, when dropped, pops out of the namespace context.
-pub struct Namespace<'a, E: ScalarEngine, CS: ConstraintSystem<E> + 'a>(&'a mut CS, PhantomData<E>);
+pub struct Namespace<'a, E: ScalarEngine, CS: ConstraintSystem<E>>(&'a mut CS, PhantomData<E>);
 
 impl<'cs, E: ScalarEngine, CS: ConstraintSystem<E>> ConstraintSystem<E> for Namespace<'cs, E, CS> {
     type Root = CS::Root;

@@ -1,5 +1,6 @@
-use ff::{BitIterator, Field, PrimeField};
-use pairing::Engine;
+//! Gadgets for allocating bits in the circuit and performing boolean logic.
+
+use ff::{BitIterator, Field, PrimeField, ScalarEngine};
 
 use crate::{ConstraintSystem, LinearCombination, SynthesisError, Variable};
 
@@ -31,7 +32,7 @@ impl AllocatedBit {
         must_be_false: &AllocatedBit,
     ) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
     {
         let var = cs.alloc(
@@ -60,7 +61,7 @@ impl AllocatedBit {
 
         Ok(AllocatedBit {
             variable: var,
-            value: value,
+            value,
         })
     }
 
@@ -68,7 +69,7 @@ impl AllocatedBit {
     /// boolean value.
     pub fn alloc<E, CS>(mut cs: CS, value: Option<bool>) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
     {
         let var = cs.alloc(
@@ -93,7 +94,7 @@ impl AllocatedBit {
 
         Ok(AllocatedBit {
             variable: var,
-            value: value,
+            value,
         })
     }
 
@@ -101,7 +102,7 @@ impl AllocatedBit {
     /// an `AllocatedBit`.
     pub fn xor<E, CS>(mut cs: CS, a: &Self, b: &Self) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
     {
         let mut result_value = None;
@@ -153,7 +154,7 @@ impl AllocatedBit {
     /// an `AllocatedBit`.
     pub fn and<E, CS>(mut cs: CS, a: &Self, b: &Self) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
     {
         let mut result_value = None;
@@ -191,7 +192,7 @@ impl AllocatedBit {
     /// Calculates `a AND (NOT b)`.
     pub fn and_not<E, CS>(mut cs: CS, a: &Self, b: &Self) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
     {
         let mut result_value = None;
@@ -229,7 +230,7 @@ impl AllocatedBit {
     /// Calculates `(NOT a) AND (NOT b)`.
     pub fn nor<E, CS>(mut cs: CS, a: &Self, b: &Self) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
     {
         let mut result_value = None;
@@ -265,7 +266,7 @@ impl AllocatedBit {
     }
 }
 
-pub fn u64_into_boolean_vec_le<E: Engine, CS: ConstraintSystem<E>>(
+pub fn u64_into_boolean_vec_le<E: ScalarEngine, CS: ConstraintSystem<E>>(
     mut cs: CS,
     value: Option<u64>,
 ) -> Result<Vec<Boolean>, SynthesisError> {
@@ -296,28 +297,28 @@ pub fn u64_into_boolean_vec_le<E: Engine, CS: ConstraintSystem<E>>(
     Ok(bits)
 }
 
-pub fn field_into_boolean_vec_le<E: Engine, CS: ConstraintSystem<E>, F: PrimeField>(
+pub fn field_into_boolean_vec_le<E: ScalarEngine, CS: ConstraintSystem<E>, F: PrimeField>(
     cs: CS,
     value: Option<F>,
 ) -> Result<Vec<Boolean>, SynthesisError> {
     let v = field_into_allocated_bits_le::<E, CS, F>(cs, value)?;
 
-    Ok(v.into_iter().map(|e| Boolean::from(e)).collect())
+    Ok(v.into_iter().map(Boolean::from).collect())
 }
 
-pub fn field_into_allocated_bits_le<E: Engine, CS: ConstraintSystem<E>, F: PrimeField>(
+pub fn field_into_allocated_bits_le<E: ScalarEngine, CS: ConstraintSystem<E>, F: PrimeField>(
     mut cs: CS,
     value: Option<F>,
 ) -> Result<Vec<AllocatedBit>, SynthesisError> {
     // Deconstruct in big-endian bit order
     let values = match value {
         Some(ref value) => {
-            let mut field_char = BitIterator::new(F::char());
+            let mut field_char = BitIterator::<u8, _>::new(F::char());
 
             let mut tmp = Vec::with_capacity(F::NUM_BITS as usize);
 
             let mut found_one = false;
-            for b in BitIterator::new(value.into_repr()) {
+            for b in BitIterator::<u8, _>::new(value.to_repr()) {
                 // Skip leading bits
                 found_one |= field_char.next().unwrap();
                 if !found_one {
@@ -367,7 +368,7 @@ impl Boolean {
 
     pub fn enforce_equal<E, CS>(mut cs: CS, a: &Self, b: &Self) -> Result<(), SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
     {
         match (a, b) {
@@ -412,24 +413,24 @@ impl Boolean {
     }
 
     pub fn get_value(&self) -> Option<bool> {
-        match self {
-            &Boolean::Constant(c) => Some(c),
-            &Boolean::Is(ref v) => v.get_value(),
-            &Boolean::Not(ref v) => v.get_value().map(|b| !b),
+        match *self {
+            Boolean::Constant(c) => Some(c),
+            Boolean::Is(ref v) => v.get_value(),
+            Boolean::Not(ref v) => v.get_value().map(|b| !b),
         }
     }
 
-    pub fn lc<E: Engine>(&self, one: Variable, coeff: E::Fr) -> LinearCombination<E> {
-        match self {
-            &Boolean::Constant(c) => {
+    pub fn lc<E: ScalarEngine>(&self, one: Variable, coeff: E::Fr) -> LinearCombination<E> {
+        match *self {
+            Boolean::Constant(c) => {
                 if c {
                     LinearCombination::<E>::zero() + (coeff, one)
                 } else {
                     LinearCombination::<E>::zero()
                 }
             }
-            &Boolean::Is(ref v) => LinearCombination::<E>::zero() + (coeff, v.get_variable()),
-            &Boolean::Not(ref v) => {
+            Boolean::Is(ref v) => LinearCombination::<E>::zero() + (coeff, v.get_variable()),
+            Boolean::Not(ref v) => {
                 LinearCombination::<E>::zero() + (coeff, one) - (coeff, v.get_variable())
             }
         }
@@ -442,17 +443,17 @@ impl Boolean {
 
     /// Return a negated interpretation of this boolean.
     pub fn not(&self) -> Self {
-        match self {
-            &Boolean::Constant(c) => Boolean::Constant(!c),
-            &Boolean::Is(ref v) => Boolean::Not(v.clone()),
-            &Boolean::Not(ref v) => Boolean::Is(v.clone()),
+        match *self {
+            Boolean::Constant(c) => Boolean::Constant(!c),
+            Boolean::Is(ref v) => Boolean::Not(v.clone()),
+            Boolean::Not(ref v) => Boolean::Is(v.clone()),
         }
     }
 
     /// Perform XOR over two boolean operands
     pub fn xor<'a, E, CS>(cs: CS, a: &'a Self, b: &'a Self) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
     {
         match (a, b) {
@@ -474,7 +475,7 @@ impl Boolean {
     /// Perform AND over two boolean operands
     pub fn and<'a, E, CS>(cs: CS, a: &'a Self, b: &'a Self) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
     {
         match (a, b) {
@@ -508,7 +509,7 @@ impl Boolean {
         c: &'a Self,
     ) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
     {
         let ch_value = match (a.get_value(), b.get_value(), c.get_value()) {
@@ -615,7 +616,7 @@ impl Boolean {
         c: &'a Self,
     ) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
     {
         let maj_value = match (a.get_value(), b.get_value(), c.get_value()) {
@@ -1738,6 +1739,74 @@ mod test {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_alloc_conditionally() {
+        {
+            let mut cs = TestConstraintSystem::<Bls12>::new();
+            let b = AllocatedBit::alloc(&mut cs, Some(false)).unwrap();
+
+            let value = None;
+            // if value is none, fail with SynthesisError
+            let is_err = AllocatedBit::alloc_conditionally(
+                cs.namespace(|| "alloc_conditionally"),
+                value,
+                &b,
+            )
+            .is_err();
+            assert!(is_err);
+        }
+
+        {
+            // since value is true, b must be false, so it should succeed
+            let mut cs = TestConstraintSystem::<Bls12>::new();
+
+            let value = Some(true);
+            let b = AllocatedBit::alloc(&mut cs, Some(false)).unwrap();
+            let allocated_value = AllocatedBit::alloc_conditionally(
+                cs.namespace(|| "alloc_conditionally"),
+                value,
+                &b,
+            )
+            .unwrap();
+
+            assert_eq!(allocated_value.get_value().unwrap(), true);
+            assert!(cs.is_satisfied());
+        }
+
+        {
+            // since value is true, b must be false, so it should fail
+            let mut cs = TestConstraintSystem::<Bls12>::new();
+
+            let value = Some(true);
+            let b = AllocatedBit::alloc(&mut cs, Some(true)).unwrap();
+            AllocatedBit::alloc_conditionally(cs.namespace(|| "alloc_conditionally"), value, &b)
+                .unwrap();
+
+            assert!(!cs.is_satisfied());
+        }
+
+        {
+            // since value is false, we don't care about the value of the bit
+
+            let value = Some(false);
+            //check with false bit
+            let mut cs = TestConstraintSystem::<Bls12>::new();
+            let b1 = AllocatedBit::alloc(&mut cs, Some(false)).unwrap();
+            AllocatedBit::alloc_conditionally(cs.namespace(|| "alloc_conditionally"), value, &b1)
+                .unwrap();
+
+            assert!(cs.is_satisfied());
+
+            //check with true bit
+            let mut cs = TestConstraintSystem::<Bls12>::new();
+            let b2 = AllocatedBit::alloc(&mut cs, Some(true)).unwrap();
+            AllocatedBit::alloc_conditionally(cs.namespace(|| "alloc_conditionally"), value, &b2)
+                .unwrap();
+
+            assert!(cs.is_satisfied());
         }
     }
 }

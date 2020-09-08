@@ -1,5 +1,9 @@
-use ff::{Field, PrimeField};
-use pairing::Engine;
+//! Circuit representation of a [`u32`], with helpers for the [`sha256`]
+//! gadgets.
+//!
+//! [`sha256`]: crate::gadgets::sha256
+
+use ff::{Field, PrimeField, ScalarEngine};
 
 use crate::{ConstraintSystem, LinearCombination, SynthesisError};
 
@@ -33,7 +37,7 @@ impl UInt32 {
         }
 
         UInt32 {
-            bits: bits,
+            bits,
             value: Some(value),
         }
     }
@@ -41,7 +45,7 @@ impl UInt32 {
     /// Allocate a `UInt32` in the constraint system
     pub fn alloc<E, CS>(mut cs: CS, value: Option<u32>) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
     {
         let values = match value {
@@ -69,14 +73,13 @@ impl UInt32 {
             })
             .collect::<Result<Vec<_>, SynthesisError>>()?;
 
-        Ok(UInt32 {
-            bits: bits,
-            value: value,
-        })
+        Ok(UInt32 { bits, value })
     }
 
-    pub fn into_bits_be(&self) -> Vec<Boolean> {
-        self.bits.iter().rev().cloned().collect()
+    pub fn into_bits_be(self) -> Vec<Boolean> {
+        let mut ret = self.bits;
+        ret.reverse();
+        ret
     }
 
     pub fn from_bits_be(bits: &[Boolean]) -> Self {
@@ -98,14 +101,14 @@ impl UInt32 {
         }
 
         UInt32 {
-            value: value,
+            value,
             bits: bits.iter().rev().cloned().collect(),
         }
     }
 
     /// Turns this `UInt32` into its little-endian byte order representation.
-    pub fn into_bits(&self) -> Vec<Boolean> {
-        self.bits.clone()
+    pub fn into_bits(self) -> Vec<Boolean> {
+        self.bits
     }
 
     /// Converts a little-endian byte order representation of bits into a
@@ -119,20 +122,20 @@ impl UInt32 {
         for b in new_bits.iter().rev() {
             value.as_mut().map(|v| *v <<= 1);
 
-            match b {
-                &Boolean::Constant(b) => {
+            match *b {
+                Boolean::Constant(b) => {
                     if b {
                         value.as_mut().map(|v| *v |= 1);
                     }
                 }
-                &Boolean::Is(ref b) => match b.get_value() {
+                Boolean::Is(ref b) => match b.get_value() {
                     Some(true) => {
                         value.as_mut().map(|v| *v |= 1);
                     }
                     Some(false) => {}
                     None => value = None,
                 },
-                &Boolean::Not(ref b) => match b.get_value() {
+                Boolean::Not(ref b) => match b.get_value() {
                     Some(false) => {
                         value.as_mut().map(|v| *v |= 1);
                     }
@@ -143,7 +146,7 @@ impl UInt32 {
         }
 
         UInt32 {
-            value: value,
+            value,
             bits: new_bits,
         }
     }
@@ -195,7 +198,7 @@ impl UInt32 {
         circuit_fn: U,
     ) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
         F: Fn(u32, u32, u32) -> u32,
         U: Fn(&mut CS, usize, &Boolean, &Boolean, &Boolean) -> Result<Boolean, SynthesisError>,
@@ -215,7 +218,7 @@ impl UInt32 {
             .collect::<Result<_, _>>()?;
 
         Ok(UInt32 {
-            bits: bits,
+            bits,
             value: new_value,
         })
     }
@@ -224,7 +227,7 @@ impl UInt32 {
     /// during SHA256.
     pub fn sha256_maj<E, CS>(cs: CS, a: &Self, b: &Self, c: &Self) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
     {
         Self::triop(
@@ -241,7 +244,7 @@ impl UInt32 {
     /// during SHA256.
     pub fn sha256_ch<E, CS>(cs: CS, a: &Self, b: &Self, c: &Self) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
     {
         Self::triop(
@@ -257,7 +260,7 @@ impl UInt32 {
     /// XOR this `UInt32` with another `UInt32`
     pub fn xor<E, CS>(&self, mut cs: CS, other: &Self) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
     {
         let new_value = match (self.value, other.value) {
@@ -274,7 +277,7 @@ impl UInt32 {
             .collect::<Result<_, _>>()?;
 
         Ok(UInt32 {
-            bits: bits,
+            bits,
             value: new_value,
         })
     }
@@ -282,7 +285,7 @@ impl UInt32 {
     /// Perform modular addition of several `UInt32` objects.
     pub fn addmany<E, CS, M>(mut cs: M, operands: &[Self]) -> Result<Self, SynthesisError>
     where
-        E: Engine,
+        E: ScalarEngine,
         CS: ConstraintSystem<E>,
         M: ConstraintSystem<E, Root = MultiEq<E, CS>>,
     {
@@ -294,7 +297,7 @@ impl UInt32 {
 
         // Compute the maximum value of the sum so we allocate enough bits for
         // the result
-        let mut max_value = (operands.len() as u64) * (u32::max_value() as u64);
+        let mut max_value = (operands.len() as u64) * (u64::from(u32::max_value()));
 
         // Keep track of the resulting value
         let mut result_value = Some(0u64);
@@ -310,7 +313,7 @@ impl UInt32 {
             // Accumulate the value
             match op.value {
                 Some(val) => {
-                    result_value.as_mut().map(|v| *v += val as u64);
+                    result_value.as_mut().map(|v| *v += u64::from(val));
                 }
                 None => {
                     // If any of our operands have unknown value, we won't
@@ -327,7 +330,7 @@ impl UInt32 {
 
                 all_constants &= bit.is_constant();
 
-                coeff.double();
+                coeff = coeff.double();
             }
         }
 
@@ -365,7 +368,7 @@ impl UInt32 {
 
             max_value >>= 1;
             i += 1;
-            coeff.double();
+            coeff = coeff.double();
         }
 
         // Enforce equality between the sum and result
@@ -401,15 +404,15 @@ mod test {
         ]);
 
         for _ in 0..1000 {
-            let mut v = (0..32)
+            let v = (0..32)
                 .map(|_| Boolean::constant(rng.next_u32() % 2 != 0))
                 .collect::<Vec<_>>();
 
             let b = UInt32::from_bits_be(&v);
 
             for (i, bit) in b.bits.iter().enumerate() {
-                match bit {
-                    &Boolean::Constant(bit) => {
+                match *bit {
+                    Boolean::Constant(bit) => {
                         assert!(bit == ((b.value.unwrap() >> i) & 1 == 1));
                     }
                     _ => unreachable!(),
@@ -436,15 +439,15 @@ mod test {
         ]);
 
         for _ in 0..1000 {
-            let mut v = (0..32)
+            let v = (0..32)
                 .map(|_| Boolean::constant(rng.next_u32() % 2 != 0))
                 .collect::<Vec<_>>();
 
             let b = UInt32::from_bits(&v);
 
             for (i, bit) in b.bits.iter().enumerate() {
-                match bit {
-                    &Boolean::Constant(bit) => {
+                match *bit {
+                    Boolean::Constant(bit) => {
                         assert!(bit == ((b.value.unwrap() >> i) & 1 == 1));
                     }
                     _ => unreachable!(),
@@ -491,14 +494,14 @@ mod test {
             assert!(r.value == Some(expected));
 
             for b in r.bits.iter() {
-                match b {
-                    &Boolean::Is(ref b) => {
+                match *b {
+                    Boolean::Is(ref b) => {
                         assert!(b.get_value().unwrap() == (expected & 1 == 1));
                     }
-                    &Boolean::Not(ref b) => {
+                    Boolean::Not(ref b) => {
                         assert!(!b.get_value().unwrap() == (expected & 1 == 1));
                     }
-                    &Boolean::Constant(b) => {
+                    Boolean::Constant(b) => {
                         assert!(b == (expected & 1 == 1));
                     }
                 }
@@ -538,10 +541,10 @@ mod test {
             assert!(r.value == Some(expected));
 
             for b in r.bits.iter() {
-                match b {
-                    &Boolean::Is(_) => panic!(),
-                    &Boolean::Not(_) => panic!(),
-                    &Boolean::Constant(b) => {
+                match *b {
+                    Boolean::Is(_) => panic!(),
+                    Boolean::Not(_) => panic!(),
+                    Boolean::Constant(b) => {
                         assert!(b == (expected & 1 == 1));
                     }
                 }
@@ -576,8 +579,7 @@ mod test {
             let r = a_bit.xor(cs.namespace(|| "xor"), &b_bit).unwrap();
             let r = {
                 let mut cs = MultiEq::new(&mut cs);
-                let r = UInt32::addmany(cs.namespace(|| "addition"), &[r, c_bit, d_bit]).unwrap();
-                r
+                UInt32::addmany(cs.namespace(|| "addition"), &[r, c_bit, d_bit]).unwrap()
             };
 
             assert!(cs.is_satisfied());
@@ -585,14 +587,14 @@ mod test {
             assert!(r.value == Some(expected));
 
             for b in r.bits.iter() {
-                match b {
-                    &Boolean::Is(ref b) => {
+                match *b {
+                    Boolean::Is(ref b) => {
                         assert!(b.get_value().unwrap() == (expected & 1 == 1));
                     }
-                    &Boolean::Not(ref b) => {
+                    Boolean::Not(ref b) => {
                         assert!(!b.get_value().unwrap() == (expected & 1 == 1));
                     }
-                    &Boolean::Constant(_) => unreachable!(),
+                    Boolean::Constant(_) => unreachable!(),
                 }
 
                 expected >>= 1;
@@ -628,8 +630,8 @@ mod test {
 
             let mut tmp = num;
             for b in &b.bits {
-                match b {
-                    &Boolean::Constant(b) => {
+                match *b {
+                    Boolean::Constant(b) => {
                         assert_eq!(b, tmp & 1 == 1);
                     }
                     _ => unreachable!(),

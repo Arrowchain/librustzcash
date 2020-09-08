@@ -1,14 +1,16 @@
-use ff::{Field, PrimeField, PrimeFieldRepr};
+//! Structs for core Zcash primitives.
 
-use constants;
+use ff::{Field, PrimeField};
 
-use group_hash::group_hash;
+use crate::constants;
 
-use pedersen_hash::{pedersen_hash, Personalization};
+use crate::group_hash::group_hash;
+
+use crate::pedersen_hash::{pedersen_hash, Personalization};
 
 use byteorder::{LittleEndian, WriteBytesExt};
 
-use jubjub::{edwards, FixedGenerators, JubjubEngine, JubjubParams, PrimeOrder};
+use crate::jubjub::{edwards, FixedGenerators, JubjubEngine, JubjubParams, PrimeOrder};
 
 use blake2s_simd::Params as Blake2sParams;
 
@@ -22,7 +24,7 @@ impl<E: JubjubEngine> ValueCommitment<E> {
     pub fn cm(&self, params: &E::Params) -> edwards::Point<E, PrimeOrder> {
         params
             .generator(FixedGenerators::ValueCommitmentValue)
-            .mul(self.value, params)
+            .mul(E::Fs::from(self.value), params)
             .add(
                 &params
                     .generator(FixedGenerators::ValueCommitmentRandomness)
@@ -39,7 +41,7 @@ pub struct ProofGenerationKey<E: JubjubEngine> {
 }
 
 impl<E: JubjubEngine> ProofGenerationKey<E> {
-    pub fn into_viewing_key(&self, params: &E::Params) -> ViewingKey<E> {
+    pub fn to_viewing_key(&self, params: &E::Params) -> ViewingKey<E> {
         ViewingKey {
             ak: self.ak.clone(),
             nk: params
@@ -84,23 +86,20 @@ impl<E: JubjubEngine> ViewingKey<E> {
         h[31] &= 0b0000_0111;
 
         let mut e = <E::Fs as PrimeField>::Repr::default();
-        e.read_le(&h[..]).unwrap();
+        e.as_mut().copy_from_slice(&h[..]);
 
         E::Fs::from_repr(e).expect("should be a valid scalar")
     }
 
-    pub fn into_payment_address(
+    pub fn to_payment_address(
         &self,
         diversifier: Diversifier,
         params: &E::Params,
     ) -> Option<PaymentAddress<E>> {
-        diversifier.g_d(params).map(|g_d| {
+        diversifier.g_d(params).and_then(|g_d| {
             let pk_d = g_d.mul(self.ivk(), params);
 
-            PaymentAddress {
-                pk_d: pk_d,
-                diversifier: diversifier,
-            }
+            PaymentAddress::from_parts(diversifier, pk_d)
         })
     }
 }
@@ -121,10 +120,16 @@ impl Diversifier {
     }
 }
 
+/// A Sapling payment address.
+///
+/// # Invariants
+///
+/// `pk_d` is guaranteed to be prime-order (i.e. in the prime-order subgroup of Jubjub,
+/// and not the identity).
 #[derive(Clone, Debug)]
 pub struct PaymentAddress<E: JubjubEngine> {
-    pub pk_d: edwards::Point<E, PrimeOrder>,
-    pub diversifier: Diversifier,
+    pk_d: edwards::Point<E, PrimeOrder>,
+    diversifier: Diversifier,
 }
 
 impl<E: JubjubEngine> PartialEq for PaymentAddress<E> {
@@ -134,6 +139,67 @@ impl<E: JubjubEngine> PartialEq for PaymentAddress<E> {
 }
 
 impl<E: JubjubEngine> PaymentAddress<E> {
+    /// Constructs a PaymentAddress from a diversifier and a Jubjub point.
+    ///
+    /// Returns None if `pk_d` is the identity.
+    pub fn from_parts(
+        diversifier: Diversifier,
+        pk_d: edwards::Point<E, PrimeOrder>,
+    ) -> Option<Self> {
+        if pk_d == edwards::Point::zero() {
+            None
+        } else {
+            Some(PaymentAddress { pk_d, diversifier })
+        }
+    }
+
+    /// Constructs a PaymentAddress from a diversifier and a Jubjub point.
+    ///
+    /// Only for test code, as this explicitly bypasses the invariant.
+    #[cfg(test)]
+    pub(crate) fn from_parts_unchecked(
+        diversifier: Diversifier,
+        pk_d: edwards::Point<E, PrimeOrder>,
+    ) -> Self {
+        PaymentAddress { pk_d, diversifier }
+    }
+
+    /// Parses a PaymentAddress from bytes.
+    pub fn from_bytes(bytes: &[u8; 43], params: &E::Params) -> Option<Self> {
+        let diversifier = {
+            let mut tmp = [0; 11];
+            tmp.copy_from_slice(&bytes[0..11]);
+            Diversifier(tmp)
+        };
+        // Check that the diversifier is valid
+        if diversifier.g_d::<E>(params).is_none() {
+            return None;
+        }
+
+        edwards::Point::<E, _>::read(&bytes[11..43], params)
+            .ok()?
+            .as_prime_order(params)
+            .and_then(|pk_d| PaymentAddress::from_parts(diversifier, pk_d))
+    }
+
+    /// Returns the byte encoding of this `PaymentAddress`.
+    pub fn to_bytes(&self) -> [u8; 43] {
+        let mut bytes = [0; 43];
+        bytes[0..11].copy_from_slice(&self.diversifier.0);
+        self.pk_d.write(&mut bytes[11..]).unwrap();
+        bytes
+    }
+
+    /// Returns the [`Diversifier`] for this `PaymentAddress`.
+    pub fn diversifier(&self) -> &Diversifier {
+        &self.diversifier
+    }
+
+    /// Returns `pk_d` for this `PaymentAddress`.
+    pub fn pk_d(&self) -> &edwards::Point<E, PrimeOrder> {
+        &self.pk_d
+    }
+
     pub fn g_d(&self, params: &E::Params) -> Option<edwards::Point<E, PrimeOrder>> {
         self.diversifier.g_d(params)
     }
@@ -145,9 +211,9 @@ impl<E: JubjubEngine> PaymentAddress<E> {
         params: &E::Params,
     ) -> Option<Note<E>> {
         self.g_d(params).map(|g_d| Note {
-            value: value,
+            value,
             r: randomness,
-            g_d: g_d,
+            g_d,
             pk_d: self.pk_d.clone(),
         })
     }
@@ -225,7 +291,7 @@ impl<E: JubjubEngine> Note<E> {
         let rho = self.cm_full_point(params).add(
             &params
                 .generator(FixedGenerators::NullifierPosition)
-                .mul(position, params),
+                .mul(E::Fs::from(position), params),
             params,
         );
 
@@ -245,6 +311,6 @@ impl<E: JubjubEngine> Note<E> {
     pub fn cm(&self, params: &E::Params) -> E::Fr {
         // The commitment is in the prime order subgroup, so mapping the
         // commitment to the x-coordinate is an injective encoding.
-        self.cm_full_point(params).into_xy().0
+        self.cm_full_point(params).to_xy().0
     }
 }

@@ -1,18 +1,18 @@
 use rand_core::RngCore;
-
+use std::ops::{AddAssign, MulAssign};
 use std::sync::Arc;
 
-use ff::{Field, PrimeField};
+use ff::Field;
 use group::{CurveAffine, CurveProjective, Wnaf};
 use pairing::Engine;
 
 use super::{Parameters, VerifyingKey};
 
-use {Circuit, ConstraintSystem, Index, LinearCombination, SynthesisError, Variable};
+use crate::{Circuit, ConstraintSystem, Index, LinearCombination, SynthesisError, Variable};
 
-use domain::{EvaluationDomain, Scalar};
+use crate::domain::{EvaluationDomain, Scalar};
 
-use multicore::Worker;
+use crate::multicore::Worker;
 
 /// Generates a random common reference string for
 /// a circuit.
@@ -215,8 +215,22 @@ where
         assembly.num_inputs + assembly.num_aux
     });
 
-    let gamma_inverse = gamma.inverse().ok_or(SynthesisError::UnexpectedIdentity)?;
-    let delta_inverse = delta.inverse().ok_or(SynthesisError::UnexpectedIdentity)?;
+    let gamma_inverse = {
+        let inverse = gamma.invert();
+        if bool::from(inverse.is_some()) {
+            Ok(inverse.unwrap())
+        } else {
+            Err(SynthesisError::UnexpectedIdentity)
+        }
+    }?;
+    let delta_inverse = {
+        let inverse = delta.invert();
+        if bool::from(inverse.is_some()) {
+            Ok(inverse.unwrap())
+        } else {
+            Err(SynthesisError::UnexpectedIdentity)
+        }
+    }?;
 
     let worker = Worker::new();
 
@@ -227,8 +241,8 @@ where
             let powers_of_tau = powers_of_tau.as_mut();
             worker.scope(powers_of_tau.len(), |scope, chunk| {
                 for (i, powers_of_tau) in powers_of_tau.chunks_mut(chunk).enumerate() {
-                    scope.spawn(move || {
-                        let mut current_tau_power = tau.pow(&[(i * chunk) as u64]);
+                    scope.spawn(move |_scope| {
+                        let mut current_tau_power = tau.pow_vartime(&[(i * chunk) as u64]);
 
                         for p in powers_of_tau {
                             p.0 = current_tau_power;
@@ -251,7 +265,7 @@ where
             {
                 let mut g1_wnaf = g1_wnaf.shared();
 
-                scope.spawn(move || {
+                scope.spawn(move |_scope| {
                     // Set values of the H query to g1^{(tau^i * t(tau)) / delta}
                     for (h, p) in h.iter_mut().zip(p.iter()) {
                         // Compute final exponent
@@ -259,7 +273,7 @@ where
                         exp.mul_assign(&coeff);
 
                         // Exponentiate
-                        *h = g1_wnaf.scalar(exp.into_repr());
+                        *h = g1_wnaf.scalar(&exp);
                     }
 
                     // Batch normalize
@@ -330,7 +344,7 @@ where
                 let mut g1_wnaf = g1_wnaf.shared();
                 let mut g2_wnaf = g2_wnaf.shared();
 
-                scope.spawn(move || {
+                scope.spawn(move |_scope| {
                     for ((((((a, b_g1), b_g2), ext), at), bt), ct) in a
                         .iter_mut()
                         .zip(b_g1.iter_mut())
@@ -362,14 +376,14 @@ where
 
                         // Compute A query (in G1)
                         if !at.is_zero() {
-                            *a = g1_wnaf.scalar(at.into_repr());
+                            *a = g1_wnaf.scalar(&at);
                         }
 
                         // Compute B query (in G1/G2)
                         if !bt.is_zero() {
-                            let bt_repr = bt.into_repr();
-                            *b_g1 = g1_wnaf.scalar(bt_repr);
-                            *b_g2 = g2_wnaf.scalar(bt_repr);
+                            ();
+                            *b_g1 = g1_wnaf.scalar(&bt);
+                            *b_g2 = g2_wnaf.scalar(&bt);
                         }
 
                         at.mul_assign(&beta);
@@ -380,7 +394,7 @@ where
                         e.add_assign(&ct);
                         e.mul_assign(inv);
 
-                        *ext = g1_wnaf.scalar(e.into_repr());
+                        *ext = g1_wnaf.scalar(&e);
                     }
 
                     // Batch normalize
@@ -451,7 +465,7 @@ where
     };
 
     Ok(Parameters {
-        vk: vk,
+        vk,
         h: Arc::new(h.into_iter().map(|e| e.into_affine()).collect()),
         l: Arc::new(l.into_iter().map(|e| e.into_affine()).collect()),
 

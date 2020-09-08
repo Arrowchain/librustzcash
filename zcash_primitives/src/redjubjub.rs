@@ -1,28 +1,26 @@
-//! Implementation of RedJubjub, a specialization of RedDSA to the Jubjub curve.
-//! See section 5.4.6 of the Sapling protocol specification.
+//! Implementation of [RedJubjub], a specialization of RedDSA to the Jubjub
+//! curve.
+//!
+//! [RedJubjub]: https://zips.z.cash/protocol/protocol.pdf#concretereddsa
 
 use crate::jubjub::{edwards::Point, FixedGenerators, JubjubEngine, JubjubParams, Unknown};
-use ff::{Field, PrimeField, PrimeFieldRepr};
+use ff::{Field, PrimeField};
 use rand_core::RngCore;
 use std::io::{self, Read, Write};
+use std::ops::{AddAssign, MulAssign, Neg};
 
-use util::hash_to_scalar;
+use crate::util::hash_to_scalar;
 
-fn read_scalar<E: JubjubEngine, R: Read>(reader: R) -> io::Result<E::Fs> {
+fn read_scalar<E: JubjubEngine, R: Read>(mut reader: R) -> io::Result<E::Fs> {
     let mut s_repr = <E::Fs as PrimeField>::Repr::default();
-    s_repr.read_le(reader)?;
+    reader.read_exact(s_repr.as_mut())?;
 
-    match E::Fs::from_repr(s_repr) {
-        Ok(s) => Ok(s),
-        Err(_) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "scalar is not in field",
-        )),
-    }
+    E::Fs::from_repr(s_repr)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "scalar is not in field"))
 }
 
-fn write_scalar<E: JubjubEngine, W: Write>(s: &E::Fs, writer: W) -> io::Result<()> {
-    s.into_repr().write_le(writer)
+fn write_scalar<E: JubjubEngine, W: Write>(s: &E::Fs, mut writer: W) -> io::Result<()> {
+    writer.write_all(s.to_repr().as_ref())
 }
 
 fn h_star<E: JubjubEngine>(a: &[u8], b: &[u8]) -> E::Fs {
@@ -191,7 +189,7 @@ pub fn batch_verify<'a, E: JubjubEngine, R: RngCore>(
         let z = E::Fs::random(rng);
 
         s.mul_assign(&z);
-        s.negate();
+        s = s.neg();
 
         r = r.mul(z, params);
 

@@ -1,4 +1,6 @@
-use ff::{BitIterator, Field, PrimeField, PrimeFieldRepr, SqrtField};
+use ff::{BitIterator, Field, PrimeField};
+use std::ops::{AddAssign, MulAssign, Neg, SubAssign};
+use subtle::CtOption;
 
 use super::{edwards, JubjubEngine, JubjubParams, PrimeOrder, Unknown};
 
@@ -46,11 +48,10 @@ impl<E: JubjubEngine, Subgroup> PartialEq for Point<E, Subgroup> {
 }
 
 impl<E: JubjubEngine> Point<E, Unknown> {
-    pub fn get_for_x(x: E::Fr, sign: bool, params: &E::Params) -> Option<Self> {
+    pub fn get_for_x(x: E::Fr, sign: bool, params: &E::Params) -> CtOption<Self> {
         // Given an x on the curve, y = sqrt(x^3 + A*x^2 + x)
 
-        let mut x2 = x;
-        x2.square();
+        let mut x2 = x.square();
 
         let mut rhs = x2;
         rhs.mul_assign(params.montgomery_a());
@@ -58,21 +59,18 @@ impl<E: JubjubEngine> Point<E, Unknown> {
         x2.mul_assign(&x);
         rhs.add_assign(&x2);
 
-        match rhs.sqrt() {
-            Some(mut y) => {
-                if y.into_repr().is_odd() != sign {
-                    y.negate();
-                }
-
-                return Some(Point {
-                    x: x,
-                    y: y,
-                    infinity: false,
-                    _marker: PhantomData,
-                });
+        rhs.sqrt().map(|mut y| {
+            if y.is_odd() != sign {
+                y = y.neg();
             }
-            None => None,
-        }
+
+            Point {
+                x,
+                y,
+                infinity: false,
+                _marker: PhantomData,
+            }
+        })
     }
 
     /// This guarantees the point is in the prime order subgroup
@@ -88,9 +86,9 @@ impl<E: JubjubEngine> Point<E, Unknown> {
             let x = E::Fr::random(rng);
             let sign = rng.next_u32() % 2 != 0;
 
-            match Self::get_for_x(x, sign, params) {
-                Some(p) => return p,
-                None => {}
+            let p = Self::get_for_x(x, sign, params);
+            if p.is_some().into() {
+                return p.unwrap();
             }
         }
     }
@@ -99,7 +97,7 @@ impl<E: JubjubEngine> Point<E, Unknown> {
 impl<E: JubjubEngine, Subgroup> Point<E, Subgroup> {
     /// Convert from an Edwards point
     pub fn from_edwards(e: &edwards::Point<E, Subgroup>, params: &E::Params) -> Self {
-        let (x, y) = e.into_xy();
+        let (x, y) = e.to_xy();
 
         if y == E::Fr::one() {
             // The only solution for y = 1 is x = 0. (0, 1) is
@@ -140,11 +138,11 @@ impl<E: JubjubEngine, Subgroup> Point<E, Subgroup> {
                 {
                     let mut tmp = E::Fr::one();
                     tmp.sub_assign(&y);
-                    u.mul_assign(&tmp.inverse().unwrap())
+                    u.mul_assign(&tmp.invert().unwrap())
                 }
 
                 let mut v = u;
-                v.mul_assign(&x.inverse().unwrap());
+                v.mul_assign(&x.invert().unwrap());
 
                 // Scale it into the correct curve constants
                 v.mul_assign(params.scale());
@@ -178,7 +176,7 @@ impl<E: JubjubEngine, Subgroup> Point<E, Subgroup> {
         }
     }
 
-    pub fn into_xy(&self) -> Option<(E::Fr, E::Fr)> {
+    pub fn to_xy(&self) -> Option<(E::Fr, E::Fr)> {
         if self.infinity {
             None
         } else {
@@ -190,7 +188,7 @@ impl<E: JubjubEngine, Subgroup> Point<E, Subgroup> {
     pub fn negate(&self) -> Self {
         let mut p = self.clone();
 
-        p.y.negate();
+        p.y = p.y.neg();
 
         p
     }
@@ -214,26 +212,24 @@ impl<E: JubjubEngine, Subgroup> Point<E, Subgroup> {
 
         let mut delta = E::Fr::one();
         {
-            let mut tmp = params.montgomery_a().clone();
+            let mut tmp = *params.montgomery_a();
             tmp.mul_assign(&self.x);
-            tmp.double();
+            tmp = tmp.double();
             delta.add_assign(&tmp);
         }
         {
-            let mut tmp = self.x;
-            tmp.square();
+            let mut tmp = self.x.square();
             delta.add_assign(&tmp);
-            tmp.double();
+            tmp = tmp.double();
             delta.add_assign(&tmp);
         }
         {
-            let mut tmp = self.y;
-            tmp.double();
-            delta.mul_assign(&tmp.inverse().expect("y is nonzero so this must be nonzero"));
+            let tmp = self.y.double();
+            // y is nonzero so this must be nonzero
+            delta.mul_assign(&tmp.invert().unwrap());
         }
 
-        let mut x3 = delta;
-        x3.square();
+        let mut x3 = delta.square();
         x3.sub_assign(params.montgomery_a());
         x3.sub_assign(&self.x);
         x3.sub_assign(&self.x);
@@ -242,7 +238,7 @@ impl<E: JubjubEngine, Subgroup> Point<E, Subgroup> {
         y3.sub_assign(&self.x);
         y3.mul_assign(&delta);
         y3.add_assign(&self.y);
-        y3.negate();
+        y3 = y3.neg();
 
         Point {
             x: x3,
@@ -276,14 +272,11 @@ impl<E: JubjubEngine, Subgroup> Point<E, Subgroup> {
                     {
                         let mut tmp = other.x;
                         tmp.sub_assign(&self.x);
-                        delta.mul_assign(
-                            &tmp.inverse()
-                                .expect("self.x != other.x, so this must be nonzero"),
-                        );
+                        // self.x != other.x, so this must be nonzero
+                        delta.mul_assign(&tmp.invert().unwrap());
                     }
 
-                    let mut x3 = delta;
-                    x3.square();
+                    let mut x3 = delta.square();
                     x3.sub_assign(params.montgomery_a());
                     x3.sub_assign(&self.x);
                     x3.sub_assign(&other.x);
@@ -292,7 +285,7 @@ impl<E: JubjubEngine, Subgroup> Point<E, Subgroup> {
                     y3.sub_assign(&self.x);
                     y3.mul_assign(&delta);
                     y3.add_assign(&self.y);
-                    y3.negate();
+                    y3 = y3.neg();
 
                     Point {
                         x: x3,
@@ -311,7 +304,7 @@ impl<E: JubjubEngine, Subgroup> Point<E, Subgroup> {
 
         let mut res = Self::zero();
 
-        for b in BitIterator::new(scalar.into()) {
+        for b in BitIterator::<u8, _>::new(scalar.into()) {
             res = res.double(params);
 
             if b {

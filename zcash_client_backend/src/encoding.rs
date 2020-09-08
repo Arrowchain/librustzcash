@@ -2,17 +2,15 @@
 //!
 //! Human-Readable Prefixes (HRPs) for Bech32 encodings are located in the [`constants`]
 //! module.
+//!
+//! [`constants`]: crate::constants
 
 use bech32::{self, Error, FromBase32, ToBase32};
-use bs58::{self, decode::DecodeError};
 use pairing::bls12_381::Bls12;
 use std::io::{self, Write};
 use zcash_primitives::{
-    jubjub::edwards,
-    primitives::{Diversifier, PaymentAddress},
-};
-use zcash_primitives::{
     legacy::TransparentAddress,
+    primitives::PaymentAddress,
     zip32::{ExtendedFullViewingKey, ExtendedSpendingKey},
     JUBJUB,
 };
@@ -115,10 +113,11 @@ pub fn decode_extended_full_viewing_key(
 ///     0xbc, 0xe5,
 /// ]);
 ///
-/// let pa = PaymentAddress {
-///     diversifier: Diversifier([0u8; 11]),
-///     pk_d: edwards::Point::<Bls12, _>::rand(rng, &JUBJUB).mul_by_cofactor(&JUBJUB),
-/// };
+/// let pa = PaymentAddress::from_parts(
+///     Diversifier([0u8; 11]),
+///     edwards::Point::<Bls12, _>::rand(rng, &JUBJUB).mul_by_cofactor(&JUBJUB),
+/// )
+/// .unwrap();
 ///
 /// assert_eq!(
 ///     encode_payment_address(HRP_SAPLING_PAYMENT_ADDRESS, &pa),
@@ -126,10 +125,7 @@ pub fn decode_extended_full_viewing_key(
 /// );
 /// ```
 pub fn encode_payment_address(hrp: &str, addr: &PaymentAddress<Bls12>) -> String {
-    bech32_encode(hrp, |w| {
-        w.write_all(&addr.diversifier.0)?;
-        addr.pk_d.write(w)
-    })
+    bech32_encode(hrp, |w| w.write_all(&addr.to_bytes()))
 }
 
 /// Decodes a [`PaymentAddress`] from a Bech32-encoded string.
@@ -155,10 +151,11 @@ pub fn encode_payment_address(hrp: &str, addr: &PaymentAddress<Bls12>) -> String
 ///     0xbc, 0xe5,
 /// ]);
 ///
-/// let pa = PaymentAddress {
-///     diversifier: Diversifier([0u8; 11]),
-///     pk_d: edwards::Point::<Bls12, _>::rand(rng, &JUBJUB).mul_by_cofactor(&JUBJUB),
-/// };
+/// let pa = PaymentAddress::from_parts(
+///     Diversifier([0u8; 11]),
+///     edwards::Point::<Bls12, _>::rand(rng, &JUBJUB).mul_by_cofactor(&JUBJUB),
+/// )
+/// .unwrap();
 ///
 /// assert_eq!(
 ///     decode_payment_address(
@@ -170,69 +167,14 @@ pub fn encode_payment_address(hrp: &str, addr: &PaymentAddress<Bls12>) -> String
 /// ```
 pub fn decode_payment_address(hrp: &str, s: &str) -> Result<Option<PaymentAddress<Bls12>>, Error> {
     bech32_decode(hrp, s, |data| {
-        let mut diversifier = Diversifier([0; 11]);
-        diversifier.0.copy_from_slice(&data[0..11]);
-        // Check that the diversifier is valid
-        if diversifier.g_d::<Bls12>(&JUBJUB).is_none() {
+        if data.len() != 43 {
             return None;
         }
 
-        edwards::Point::<Bls12, _>::read(&data[11..], &JUBJUB)
-            .ok()?
-            .as_prime_order(&JUBJUB)
-            .map(|pk_d| PaymentAddress { pk_d, diversifier })
+        let mut bytes = [0; 43];
+        bytes.copy_from_slice(&data);
+        PaymentAddress::<Bls12>::from_bytes(&bytes, &JUBJUB)
     })
-}
-
-/// Writes a [`TransparentAddress`] as a Base58Check-encoded string.
-///
-/// # Examples
-///
-/// ```
-/// use zcash_client_backend::{
-///     constants::testnet::{B58_PUBKEY_ADDRESS_PREFIX, B58_SCRIPT_ADDRESS_PREFIX},
-///     encoding::encode_transparent_address,
-/// };
-/// use zcash_primitives::legacy::TransparentAddress;
-///
-/// assert_eq!(
-///     encode_transparent_address(
-///         &B58_PUBKEY_ADDRESS_PREFIX,
-///         &B58_SCRIPT_ADDRESS_PREFIX,
-///         &TransparentAddress::PublicKey([0; 20]),
-///     ),
-///     "tm9iMLAuYMzJ6jtFLcA7rzUmfreGuKvr7Ma",
-/// );
-///
-/// assert_eq!(
-///     encode_transparent_address(
-///         &B58_PUBKEY_ADDRESS_PREFIX,
-///         &B58_SCRIPT_ADDRESS_PREFIX,
-///         &TransparentAddress::Script([0; 20]),
-///     ),
-///     "t26YoyZ1iPgiMEWL4zGUm74eVWfhyDMXzY2",
-/// );
-/// ```
-pub fn encode_transparent_address(
-    pubkey_version: &[u8],
-    script_version: &[u8],
-    addr: &TransparentAddress,
-) -> String {
-    let decoded = match addr {
-        TransparentAddress::PublicKey(key_id) => {
-            let mut decoded = vec![0; pubkey_version.len() + 20];
-            decoded[..pubkey_version.len()].copy_from_slice(pubkey_version);
-            decoded[pubkey_version.len()..].copy_from_slice(key_id);
-            decoded
-        }
-        TransparentAddress::Script(script_id) => {
-            let mut decoded = vec![0; script_version.len() + 20];
-            decoded[..script_version.len()].copy_from_slice(script_version);
-            decoded[script_version.len()..].copy_from_slice(script_id);
-            decoded
-        }
-    };
-    bs58::encode(decoded).with_check().into_string()
 }
 
 /// Decodes a [`TransparentAddress`] from a Base58Check-encoded string.
@@ -268,7 +210,7 @@ pub fn decode_transparent_address(
     pubkey_version: &[u8],
     script_version: &[u8],
     s: &str,
-) -> Result<Option<TransparentAddress>, DecodeError> {
+) -> Result<Option<TransparentAddress>, bs58::decode::Error> {
     let decoded = bs58::decode(s).with_check(None).into_vec()?;
     if &decoded[..pubkey_version.len()] == pubkey_version {
         if decoded.len() == pubkey_version.len() + 20 {
@@ -300,10 +242,94 @@ mod tests {
     use zcash_primitives::{
         jubjub::edwards,
         primitives::{Diversifier, PaymentAddress},
+        zip32::ExtendedSpendingKey,
     };
 
-    use super::{decode_payment_address, encode_payment_address};
+    use super::{
+        decode_extended_full_viewing_key, decode_extended_spending_key, decode_payment_address,
+        encode_extended_full_viewing_key, encode_extended_spending_key, encode_payment_address,
+    };
     use crate::constants;
+
+    #[test]
+    fn extended_spending_key() {
+        let extsk = ExtendedSpendingKey::master(&[0; 32][..]);
+
+        let encoded_main = "secret-extended-key-main1qqqqqqqqqqqqqq8n3zjjmvhhr854uy3qhpda3ml34haf0x388z5r7h4st4kpsf6qysqws3xh6qmha7gna72fs2n4clnc9zgyd22s658f65pex4exe56qjk5pqj9vfdq7dfdhjc2rs9jdwq0zl99uwycyrxzp86705rk687spn44e2uhm7h0hsagfvkk4n7n6nfer6u57v9cac84t7nl2zth0xpyfeg0w2p2wv2yn6jn923aaz0vdaml07l60ahapk6efchyxwysrvjs87qvlj";
+        let encoded_test = "secret-extended-key-test1qqqqqqqqqqqqqq8n3zjjmvhhr854uy3qhpda3ml34haf0x388z5r7h4st4kpsf6qysqws3xh6qmha7gna72fs2n4clnc9zgyd22s658f65pex4exe56qjk5pqj9vfdq7dfdhjc2rs9jdwq0zl99uwycyrxzp86705rk687spn44e2uhm7h0hsagfvkk4n7n6nfer6u57v9cac84t7nl2zth0xpyfeg0w2p2wv2yn6jn923aaz0vdaml07l60ahapk6efchyxwysrvjsvzyw8j";
+
+        assert_eq!(
+            encode_extended_spending_key(
+                constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+                &extsk
+            ),
+            encoded_main
+        );
+        assert_eq!(
+            decode_extended_spending_key(
+                constants::mainnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+                encoded_main
+            )
+            .unwrap(),
+            Some(extsk.clone())
+        );
+
+        assert_eq!(
+            encode_extended_spending_key(
+                constants::testnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+                &extsk
+            ),
+            encoded_test
+        );
+        assert_eq!(
+            decode_extended_spending_key(
+                constants::testnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+                encoded_test
+            )
+            .unwrap(),
+            Some(extsk)
+        );
+    }
+
+    #[test]
+    fn extended_full_viewing_key() {
+        let extfvk = (&ExtendedSpendingKey::master(&[0; 32][..])).into();
+
+        let encoded_main = "zxviews1qqqqqqqqqqqqqq8n3zjjmvhhr854uy3qhpda3ml34haf0x388z5r7h4st4kpsf6qy3zw4wc246aw9rlfyg5ndlwvne7mwdq0qe6vxl42pqmcf8pvmmd5slmjxduqa9evgej6wa3th2505xq4nggrxdm93rxk4rpdjt5nmq2vn44e2uhm7h0hsagfvkk4n7n6nfer6u57v9cac84t7nl2zth0xpyfeg0w2p2wv2yn6jn923aaz0vdaml07l60ahapk6efchyxwysrvjsxmansf";
+        let encoded_test = "zxviewtestsapling1qqqqqqqqqqqqqq8n3zjjmvhhr854uy3qhpda3ml34haf0x388z5r7h4st4kpsf6qy3zw4wc246aw9rlfyg5ndlwvne7mwdq0qe6vxl42pqmcf8pvmmd5slmjxduqa9evgej6wa3th2505xq4nggrxdm93rxk4rpdjt5nmq2vn44e2uhm7h0hsagfvkk4n7n6nfer6u57v9cac84t7nl2zth0xpyfeg0w2p2wv2yn6jn923aaz0vdaml07l60ahapk6efchyxwysrvjs8evfkz";
+
+        assert_eq!(
+            encode_extended_full_viewing_key(
+                constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+                &extfvk
+            ),
+            encoded_main
+        );
+        assert_eq!(
+            decode_extended_full_viewing_key(
+                constants::mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+                encoded_main
+            )
+            .unwrap(),
+            Some(extfvk.clone())
+        );
+
+        assert_eq!(
+            encode_extended_full_viewing_key(
+                constants::testnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+                &extfvk
+            ),
+            encoded_test
+        );
+        assert_eq!(
+            decode_extended_full_viewing_key(
+                constants::testnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY,
+                encoded_test
+            )
+            .unwrap(),
+            Some(extfvk)
+        );
+    }
 
     #[test]
     fn payment_address() {
@@ -312,10 +338,11 @@ mod tests {
             0xbc, 0xe5,
         ]);
 
-        let addr = PaymentAddress {
-            diversifier: Diversifier([0u8; 11]),
-            pk_d: edwards::Point::<Bls12, _>::rand(rng, &JUBJUB).mul_by_cofactor(&JUBJUB),
-        };
+        let addr = PaymentAddress::from_parts(
+            Diversifier([0u8; 11]),
+            edwards::Point::<Bls12, _>::rand(rng, &JUBJUB).mul_by_cofactor(&JUBJUB),
+        )
+        .unwrap();
 
         let encoded_main =
             "zs1qqqqqqqqqqqqqqqqqrjq05nyfku05msvu49mawhg6kr0wwljahypwyk2h88z6975u563j8nfaxd";
@@ -356,10 +383,11 @@ mod tests {
             0xbc, 0xe5,
         ]);
 
-        let addr = PaymentAddress {
-            diversifier: Diversifier([1u8; 11]),
-            pk_d: edwards::Point::<Bls12, _>::rand(rng, &JUBJUB).mul_by_cofactor(&JUBJUB),
-        };
+        let addr = PaymentAddress::from_parts(
+            Diversifier([1u8; 11]),
+            edwards::Point::<Bls12, _>::rand(rng, &JUBJUB).mul_by_cofactor(&JUBJUB),
+        )
+        .unwrap();
 
         let encoded_main =
             encode_payment_address(constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS, &addr);

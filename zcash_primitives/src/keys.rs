@@ -1,20 +1,22 @@
 //! Sapling key components.
 //!
-//! Implements section 4.2.2 of the Zcash Protocol Specification.
+//! Implements [section 4.2.2] of the Zcash Protocol Specification.
+//!
+//! [section 4.2.2]: https://zips.z.cash/protocol/protocol.pdf#saplingkeycomponents
 
 use crate::{
     jubjub::{edwards, FixedGenerators, JubjubEngine, JubjubParams, ToUniform, Unknown},
     primitives::{ProofGenerationKey, ViewingKey},
 };
 use blake2b_simd::{Hash as Blake2bHash, Params as Blake2bParams};
-use ff::{PrimeField, PrimeFieldRepr};
+use ff::PrimeField;
 use std::io::{self, Read, Write};
 
-pub const PRF_EXPAND_PERSONALIZATION: &'static [u8; 16] = b"Zcash_ExpandSeed";
+pub const PRF_EXPAND_PERSONALIZATION: &[u8; 16] = b"Zcash_ExpandSeed";
 
 /// PRF^expand(sk, t) := BLAKE2b-512("Zcash_ExpandSeed", sk || t)
 pub fn prf_expand(sk: &[u8], t: &[u8]) -> Blake2bHash {
-    prf_expand_vec(sk, &vec![t])
+    prf_expand_vec(sk, &[t])
 }
 
 pub fn prf_expand_vec(sk: &[u8], ts: &[&[u8]]) -> Blake2bHash {
@@ -69,14 +71,14 @@ impl<E: JubjubEngine> ExpandedSpendingKey<E> {
 
     pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
         let mut ask_repr = <E::Fs as PrimeField>::Repr::default();
-        ask_repr.read_le(&mut reader)?;
+        reader.read_exact(ask_repr.as_mut())?;
         let ask = E::Fs::from_repr(ask_repr)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "ask not in field"))?;
 
         let mut nsk_repr = <E::Fs as PrimeField>::Repr::default();
-        nsk_repr.read_le(&mut reader)?;
+        reader.read_exact(nsk_repr.as_mut())?;
         let nsk = E::Fs::from_repr(nsk_repr)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "nsk not in field"))?;
 
         let mut ovk = [0; 32];
         reader.read_exact(&mut ovk)?;
@@ -89,8 +91,8 @@ impl<E: JubjubEngine> ExpandedSpendingKey<E> {
     }
 
     pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
-        self.ask.into_repr().write_le(&mut writer)?;
-        self.nsk.into_repr().write_le(&mut writer)?;
+        writer.write_all(self.ask.to_repr().as_ref())?;
+        writer.write_all(self.nsk.to_repr().as_ref())?;
         writer.write_all(&self.ovk.0)?;
 
         Ok(())
@@ -111,7 +113,7 @@ impl<E: JubjubEngine> Clone for FullViewingKey<E> {
                 ak: self.vk.ak.clone(),
                 nk: self.vk.nk.clone(),
             },
-            ovk: self.ovk.clone(),
+            ovk: self.ovk,
         }
     }
 }

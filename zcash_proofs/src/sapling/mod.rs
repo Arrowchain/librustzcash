@@ -1,6 +1,8 @@
+//! Helpers for creating Sapling proofs.
+
 use pairing::bls12_381::Bls12;
 use zcash_primitives::jubjub::{
-    edwards, fs::FsRepr, FixedGenerators, JubjubBls12, JubjubParams, Unknown,
+    edwards, fs::Fs, FixedGenerators, JubjubBls12, JubjubParams, Unknown,
 };
 use zcash_primitives::transaction::components::Amount;
 
@@ -28,7 +30,7 @@ fn compute_value_balance(
     // Compute it in the exponent
     let mut value_balance = params
         .generator(FixedGenerators::ValueCommitmentValue)
-        .mul(FsRepr::from(abs), params);
+        .mul(Fs::from(abs), params);
 
     // Negate if necessary
     if is_negative {
