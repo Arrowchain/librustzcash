@@ -1,5 +1,7 @@
-use ff::{BitIterator, Field, PrimeField, PrimeFieldRepr};
-use pairing::Engine;
+//! Gadgets representing numbers in the scalar field of the underlying curve.
+
+use ff::{BitIterator, Field, PrimeField, ScalarEngine};
+use std::ops::{AddAssign, MulAssign};
 
 use crate::{ConstraintSystem, LinearCombination, SynthesisError, Variable};
 
@@ -7,12 +9,12 @@ use super::Assignment;
 
 use super::boolean::{self, AllocatedBit, Boolean};
 
-pub struct AllocatedNum<E: Engine> {
+pub struct AllocatedNum<E: ScalarEngine> {
     value: Option<E::Fr>,
     variable: Variable,
 }
 
-impl<E: Engine> Clone for AllocatedNum<E> {
+impl<E: ScalarEngine> Clone for AllocatedNum<E> {
     fn clone(&self) -> Self {
         AllocatedNum {
             value: self.value,
@@ -21,7 +23,7 @@ impl<E: Engine> Clone for AllocatedNum<E> {
     }
 }
 
-impl<E: Engine> AllocatedNum<E> {
+impl<E: ScalarEngine> AllocatedNum<E> {
     pub fn alloc<CS, F>(mut cs: CS, value: F) -> Result<Self, SynthesisError>
     where
         CS: ConstraintSystem<E>,
@@ -66,7 +68,7 @@ impl<E: Engine> AllocatedNum<E> {
     /// order, requiring that the representation
     /// strictly exists "in the field" (i.e., a
     /// congruency is not allowed.)
-    pub fn into_bits_le_strict<CS>(&self, mut cs: CS) -> Result<Vec<Boolean>, SynthesisError>
+    pub fn to_bits_le_strict<CS>(&self, mut cs: CS) -> Result<Vec<Boolean>, SynthesisError>
     where
         CS: ConstraintSystem<E>,
     {
@@ -75,10 +77,10 @@ impl<E: Engine> AllocatedNum<E> {
             v: &[AllocatedBit],
         ) -> Result<AllocatedBit, SynthesisError>
         where
-            E: Engine,
+            E: ScalarEngine,
             CS: ConstraintSystem<E>,
         {
-            assert!(v.len() > 0);
+            assert!(!v.is_empty());
 
             // Let's keep this simple for now and just AND them all
             // manually
@@ -101,9 +103,8 @@ impl<E: Engine> AllocatedNum<E> {
 
         // We want to ensure that the bit representation of a is
         // less than or equal to r - 1.
-        let mut a = self.value.map(|e| BitIterator::new(e.into_repr()));
-        let mut b = E::Fr::char();
-        b.sub_noborrow(&1.into());
+        let mut a = self.value.map(|e| BitIterator::<u8, _>::new(e.to_repr()));
+        let b = (-E::Fr::one()).to_repr();
 
         let mut result = vec![];
 
@@ -113,7 +114,7 @@ impl<E: Engine> AllocatedNum<E> {
 
         let mut found_one = false;
         let mut i = 0;
-        for b in BitIterator::new(b) {
+        for b in BitIterator::<u8, _>::new(b) {
             let a_bit = a.as_mut().map(|e| e.next().unwrap());
 
             // Skip over unset bits at the beginning
@@ -132,7 +133,7 @@ impl<E: Engine> AllocatedNum<E> {
                 current_run.push(a_bit.clone());
                 result.push(a_bit);
             } else {
-                if current_run.len() > 0 {
+                if !current_run.is_empty() {
                     // This is the start of a run of zeros, but we need
                     // to k-ary AND against `last_run` first.
 
@@ -175,7 +176,7 @@ impl<E: Engine> AllocatedNum<E> {
         for bit in result.iter().rev() {
             lc = lc + (coeff, bit.get_variable());
 
-            coeff.double();
+            coeff = coeff.double();
         }
 
         lc = lc - self.variable;
@@ -183,13 +184,13 @@ impl<E: Engine> AllocatedNum<E> {
         cs.enforce(|| "unpacking constraint", |lc| lc, |lc| lc, |_| lc);
 
         // Convert into booleans, and reverse for little-endian bit order
-        Ok(result.into_iter().map(|b| Boolean::from(b)).rev().collect())
+        Ok(result.into_iter().map(Boolean::from).rev().collect())
     }
 
     /// Convert the allocated number into its little-endian representation.
     /// Note that this does not strongly enforce that the commitment is
     /// "in the field."
-    pub fn into_bits_le<CS>(&self, mut cs: CS) -> Result<Vec<Boolean>, SynthesisError>
+    pub fn to_bits_le<CS>(&self, mut cs: CS) -> Result<Vec<Boolean>, SynthesisError>
     where
         CS: ConstraintSystem<E>,
     {
@@ -201,14 +202,14 @@ impl<E: Engine> AllocatedNum<E> {
         for bit in bits.iter() {
             lc = lc + (coeff, bit.get_variable());
 
-            coeff.double();
+            coeff = coeff.double();
         }
 
         lc = lc - self.variable;
 
         cs.enforce(|| "unpacking constraint", |lc| lc, |lc| lc, |_| lc);
 
-        Ok(bits.into_iter().map(|b| Boolean::from(b)).collect())
+        Ok(bits.into_iter().map(Boolean::from).collect())
     }
 
     pub fn mul<CS>(&self, mut cs: CS, other: &Self) -> Result<Self, SynthesisError>
@@ -238,7 +239,7 @@ impl<E: Engine> AllocatedNum<E> {
         );
 
         Ok(AllocatedNum {
-            value: value,
+            value,
             variable: var,
         })
     }
@@ -252,8 +253,7 @@ impl<E: Engine> AllocatedNum<E> {
         let var = cs.alloc(
             || "squared num",
             || {
-                let mut tmp = *self.value.get()?;
-                tmp.square();
+                let tmp = self.value.get()?.square();
 
                 value = Some(tmp);
 
@@ -270,7 +270,7 @@ impl<E: Engine> AllocatedNum<E> {
         );
 
         Ok(AllocatedNum {
-            value: value,
+            value,
             variable: var,
         })
     }
@@ -287,7 +287,7 @@ impl<E: Engine> AllocatedNum<E> {
                 if tmp.is_zero() {
                     Err(SynthesisError::DivisionByZero)
                 } else {
-                    Ok(tmp.inverse().unwrap())
+                    Ok(tmp.invert().unwrap())
                 }
             },
         )?;
@@ -359,12 +359,12 @@ impl<E: Engine> AllocatedNum<E> {
     }
 }
 
-pub struct Num<E: Engine> {
+pub struct Num<E: ScalarEngine> {
     value: Option<E::Fr>,
     lc: LinearCombination<E>,
 }
 
-impl<E: Engine> From<AllocatedNum<E>> for Num<E> {
+impl<E: ScalarEngine> From<AllocatedNum<E>> for Num<E> {
     fn from(num: AllocatedNum<E>) -> Num<E> {
         Num {
             value: num.value,
@@ -373,7 +373,7 @@ impl<E: Engine> From<AllocatedNum<E>> for Num<E> {
     }
 }
 
-impl<E: Engine> Num<E> {
+impl<E: ScalarEngine> Num<E> {
     pub fn zero() -> Self {
         Num {
             value: Some(E::Fr::zero()),
@@ -415,6 +415,7 @@ mod test {
     use pairing::bls12_381::{Bls12, Fr};
     use rand_core::SeedableRng;
     use rand_xorshift::XorShiftRng;
+    use std::ops::{Neg, SubAssign};
 
     use super::{AllocatedNum, Boolean};
     use crate::gadgets::test::*;
@@ -516,13 +517,12 @@ mod test {
 
     #[test]
     fn test_into_bits_strict() {
-        let mut negone = Fr::one();
-        negone.negate();
+        let negone = Fr::one().neg();
 
         let mut cs = TestConstraintSystem::<Bls12>::new();
 
         let n = AllocatedNum::alloc(&mut cs, || Ok(negone)).unwrap();
-        n.into_bits_le_strict(&mut cs).unwrap();
+        n.to_bits_le_strict(&mut cs).unwrap();
 
         assert!(cs.is_satisfied());
 
@@ -550,14 +550,14 @@ mod test {
             let n = AllocatedNum::alloc(&mut cs, || Ok(r)).unwrap();
 
             let bits = if i % 2 == 0 {
-                n.into_bits_le(&mut cs).unwrap()
+                n.to_bits_le(&mut cs).unwrap()
             } else {
-                n.into_bits_le_strict(&mut cs).unwrap()
+                n.to_bits_le_strict(&mut cs).unwrap()
             };
 
             assert!(cs.is_satisfied());
 
-            for (b, a) in BitIterator::new(r.into_repr())
+            for (b, a) in BitIterator::<u8, _>::new(r.to_repr())
                 .skip(1)
                 .zip(bits.iter().rev())
             {

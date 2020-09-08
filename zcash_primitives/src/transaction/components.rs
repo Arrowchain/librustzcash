@@ -1,12 +1,14 @@
+//! Structs representing the components within Zcash transactions.
+
 use crate::jubjub::{edwards, Unknown};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use ff::{PrimeField, PrimeFieldRepr};
+use ff::PrimeField;
 use pairing::bls12_381::{Bls12, Fr, FrRepr};
 use std::io::{self, Read, Write};
 
-use legacy::Script;
-use redjubjub::{PublicKey, Signature};
-use JUBJUB;
+use crate::legacy::Script;
+use crate::redjubjub::{PublicKey, Signature};
+use crate::JUBJUB;
 
 pub mod amount;
 pub use self::amount::Amount;
@@ -27,7 +29,7 @@ pub struct OutPoint {
 
 impl OutPoint {
     pub fn new(hash: [u8; 32], n: u32) -> Self {
-        OutPoint {hash, n}
+        OutPoint { hash, n }
     }
 
     pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
@@ -117,7 +119,7 @@ pub struct SpendDescription {
 }
 
 impl std::fmt::Debug for SpendDescription {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         write!(
             f,
             "SpendDescription(cv = {:?}, anchor = {:?}, nullifier = {:?}, rk = {:?}, spend_auth_sig = {:?})",
@@ -136,9 +138,10 @@ impl SpendDescription {
 
         // Consensus rule (§7.3): Canonical encoding is enforced here
         let anchor = {
-            let mut f = FrRepr::default();
-            f.read_le(&mut reader)?;
-            Fr::from_repr(f).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?
+            let mut f = FrRepr([0; 32]);
+            reader.read_exact(&mut f.0)?;
+            Fr::from_repr(f)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "anchor not in field"))?
         };
 
         let mut nullifier = [0; 32];
@@ -173,18 +176,16 @@ impl SpendDescription {
 
     pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
         self.cv.write(&mut writer)?;
-        self.anchor.into_repr().write_le(&mut writer)?;
+        writer.write_all(self.anchor.to_repr().as_ref())?;
         writer.write_all(&self.nullifier)?;
         self.rk.write(&mut writer)?;
         writer.write_all(&self.zkproof)?;
         match self.spend_auth_sig {
             Some(sig) => sig.write(&mut writer),
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Missing spend auth signature",
-                ));
-            }
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Missing spend auth signature",
+            )),
         }
     }
 }
@@ -199,7 +200,7 @@ pub struct OutputDescription {
 }
 
 impl std::fmt::Debug for OutputDescription {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         write!(
             f,
             "OutputDescription(cv = {:?}, cmu = {:?}, ephemeral_key = {:?})",
@@ -218,9 +219,10 @@ impl OutputDescription {
 
         // Consensus rule (§7.4): Canonical encoding is enforced here
         let cmu = {
-            let mut f = FrRepr::default();
-            f.read_le(&mut reader)?;
-            Fr::from_repr(f).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?
+            let mut f = FrRepr([0; 32]);
+            reader.read_exact(&mut f.0)?;
+            Fr::from_repr(f)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "cmu not in field"))?
         };
 
         // Consensus rules (§4.5):
@@ -252,7 +254,7 @@ impl OutputDescription {
 
     pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
         self.cv.write(&mut writer)?;
-        self.cmu.into_repr().write_le(&mut writer)?;
+        writer.write_all(self.cmu.to_repr().as_ref())?;
         self.ephemeral_key.write(&mut writer)?;
         writer.write_all(&self.enc_ciphertext)?;
         writer.write_all(&self.out_ciphertext)?;
@@ -266,7 +268,7 @@ enum SproutProof {
 }
 
 impl std::fmt::Debug for SproutProof {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self {
             SproutProof::Groth(_) => write!(f, "SproutProof::Groth"),
             SproutProof::PHGR(_) => write!(f, "SproutProof::PHGR"),
@@ -288,7 +290,7 @@ pub struct JSDescription {
 }
 
 impl std::fmt::Debug for JSDescription {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         write!(
             f,
             "JSDescription(
@@ -360,23 +362,20 @@ impl JSDescription {
             .map(|mac| reader.read_exact(mac))
             .collect::<io::Result<()>>()?;
 
-        let proof = match use_groth {
-            true => {
-                // Consensus rules (§4.3):
-                // - Canonical encoding is enforced in librustzcash_sprout_verify()
-                // - Proof validity is enforced in librustzcash_sprout_verify()
-                let mut proof = [0; GROTH_PROOF_SIZE];
-                reader.read_exact(&mut proof)?;
-                SproutProof::Groth(proof)
-            }
-            false => {
-                // Consensus rules (§4.3):
-                // - Canonical encoding is enforced by PHGRProof in zcashd
-                // - Proof validity is enforced by JSDescription::Verify() in zcashd
-                let mut proof = [0; PHGR_PROOF_SIZE];
-                reader.read_exact(&mut proof)?;
-                SproutProof::PHGR(proof)
-            }
+        let proof = if use_groth {
+            // Consensus rules (§4.3):
+            // - Canonical encoding is enforced in librustzcash_sprout_verify()
+            // - Proof validity is enforced in librustzcash_sprout_verify()
+            let mut proof = [0; GROTH_PROOF_SIZE];
+            reader.read_exact(&mut proof)?;
+            SproutProof::Groth(proof)
+        } else {
+            // Consensus rules (§4.3):
+            // - Canonical encoding is enforced by PHGRProof in zcashd
+            // - Proof validity is enforced by JSDescription::Verify() in zcashd
+            let mut proof = [0; PHGR_PROOF_SIZE];
+            reader.read_exact(&mut proof)?;
+            SproutProof::PHGR(proof)
         };
 
         let mut ciphertexts = [[0; 601]; ZC_NUM_JS_OUTPUTS];

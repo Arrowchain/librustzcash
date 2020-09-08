@@ -1,9 +1,13 @@
+//! Implementation of [ZIP 32] for hierarchical deterministic key management.
+//!
+//! [ZIP 32]: https://zips.z.cash/zip-0032
+
 use aes::Aes256;
 use blake2b_simd::Params as Blake2bParams;
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};
-use ff::Field;
 use fpe::ff1::{BinaryNumeralString, FF1};
 use pairing::bls12_381::Bls12;
+use std::ops::AddAssign;
 
 use crate::{
     jubjub::{fs::Fs, FixedGenerators, JubjubEngine, JubjubParams, ToUniform},
@@ -16,8 +20,8 @@ use crate::{
     JUBJUB,
 };
 
-pub const ZIP32_SAPLING_MASTER_PERSONALIZATION: &'static [u8; 16] = b"ZcashIP32Sapling";
-pub const ZIP32_SAPLING_FVFP_PERSONALIZATION: &'static [u8; 16] = b"ZcashSaplingFVFP";
+pub const ZIP32_SAPLING_MASTER_PERSONALIZATION: &[u8; 16] = b"ZcashIP32Sapling";
+pub const ZIP32_SAPLING_FVFP_PERSONALIZATION: &[u8; 16] = b"ZcashSaplingFVFP";
 
 // Common helper functions
 
@@ -83,9 +87,9 @@ impl ChildIndex {
     }
 
     fn to_index(&self) -> u32 {
-        match self {
-            &ChildIndex::Hardened(i) => i + (1 << 31),
-            &ChildIndex::NonHardened(i) => i,
+        match *self {
+            ChildIndex::Hardened(i) => i + (1 << 31),
+            ChildIndex::NonHardened(i) => i,
         }
     }
 }
@@ -198,7 +202,7 @@ impl std::cmp::PartialEq for ExtendedSpendingKey {
 }
 
 impl std::fmt::Debug for ExtendedSpendingKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         write!(
             f,
             "ExtendedSpendingKey(d = {}, tag_p = {:?}, i = {:?})",
@@ -221,7 +225,7 @@ impl std::cmp::PartialEq for ExtendedFullViewingKey {
 }
 
 impl std::fmt::Debug for ExtendedFullViewingKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         write!(
             f,
             "ExtendedFullViewingKey(d = {}, tag_p = {:?}, i = {:?})",
@@ -434,7 +438,7 @@ impl ExtendedFullViewingKey {
             Ok(ret) => ret,
             Err(()) => return Err(()),
         };
-        match self.fvk.vk.into_payment_address(d_j, &JUBJUB) {
+        match self.fvk.vk.to_payment_address(d_j, &JUBJUB) {
             Some(addr) => Ok((j, addr)),
             None => Err(()),
         }
@@ -449,7 +453,7 @@ impl ExtendedFullViewingKey {
 mod tests {
     use super::*;
 
-    use ff::{PrimeField, PrimeFieldRepr};
+    use ff::PrimeField;
 
     #[test]
     fn derive_nonhardened_child() {
@@ -548,7 +552,7 @@ mod tests {
         let (j_m, addr_m) = xsk_m.default_address().unwrap();
         assert_eq!(j_m.0, [0; 11]);
         assert_eq!(
-            addr_m.diversifier.0,
+            addr_m.diversifier().0,
             // Computed using this Rust implementation
             [59, 246, 250, 31, 131, 191, 69, 99, 200, 167, 19]
         );
@@ -1010,11 +1014,8 @@ mod tests {
             let xsk = &xsks[j];
             let tv = &test_vectors[j];
 
-            let mut buf = [0; 32];
-            xsk.expsk.ask.into_repr().write_le(&mut buf[..]).unwrap();
-            assert_eq!(buf, tv.ask.unwrap());
-            xsk.expsk.nsk.into_repr().write_le(&mut buf[..]).unwrap();
-            assert_eq!(buf, tv.nsk.unwrap());
+            assert_eq!(xsk.expsk.ask.to_repr().as_ref(), tv.ask.unwrap());
+            assert_eq!(xsk.expsk.nsk.to_repr().as_ref(), tv.nsk.unwrap());
 
             assert_eq!(xsk.expsk.ovk.0, tv.ovk);
             assert_eq!(xsk.dk.0, tv.dk);
@@ -1039,13 +1040,7 @@ mod tests {
             assert_eq!(xfvk.dk.0, tv.dk);
             assert_eq!(xfvk.chain_code.0, tv.c);
 
-            xfvk.fvk
-                .vk
-                .ivk()
-                .into_repr()
-                .write_le(&mut buf[..])
-                .unwrap();
-            assert_eq!(buf, tv.ivk);
+            assert_eq!(xfvk.fvk.vk.ivk().to_repr().as_ref(), tv.ivk);
 
             let mut ser = vec![];
             xfvk.write(&mut ser).unwrap();

@@ -1,5 +1,6 @@
 //! Structs for building transactions.
 
+use crate::zip32::ExtendedSpendingKey;
 use crate::{
     jubjub::fs::Fs,
     primitives::{Diversifier, Note, PaymentAddress},
@@ -7,14 +8,12 @@ use crate::{
 use ff::Field;
 use pairing::bls12_381::{Bls12, Fr};
 use rand::{rngs::OsRng, seq::SliceRandom, CryptoRng, RngCore};
-use std::error;
-use std::fmt;
-use zip32::ExtendedSpendingKey;
 
 use crate::{
+    consensus,
     keys::OutgoingViewingKey,
     legacy::TransparentAddress,
-    merkle_tree::{CommitmentTreeWitness, IncrementalWitness},
+    merkle_tree::MerklePath,
     note_encryption::{generate_esk, Memo, SaplingNoteEncryption},
     prover::TxProver,
     redjubjub::PrivateKey,
@@ -45,38 +44,16 @@ pub enum Error {
     ChangeIsNegative(Amount),
     InvalidAddress,
     InvalidAmount,
-    InvalidWitness,
     NoChangeAddress,
     SpendProof,
 }
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Error::AnchorMismatch => {
-                write!(f, "Anchor mismatch (anchors for all spends must be equal)")
-            }
-            Error::BindingSig => write!(f, "Failed to create bindingSig"),
-            Error::ChangeIsNegative(amount) => {
-                write!(f, "Change is negative ({:?} zatoshis)", amount)
-            }
-            Error::InvalidAddress => write!(f, "Invalid address"),
-            Error::InvalidAmount => write!(f, "Invalid amount"),
-            Error::InvalidWitness => write!(f, "Invalid note witness"),
-            Error::NoChangeAddress => write!(f, "No change address specified or discoverable"),
-            Error::SpendProof => write!(f, "Failed to create Sapling spend proof"),
-        }
-    }
-}
-
-impl error::Error for Error {}
 
 struct SpendDescriptionInfo {
     extsk: ExtendedSpendingKey,
     diversifier: Diversifier,
     note: Note<Bls12>,
     alpha: Fs,
-    witness: CommitmentTreeWitness<Node>,
+    merkle_path: MerklePath<Node>,
 }
 
 pub struct SaplingOutput {
@@ -106,7 +83,7 @@ impl SaplingOutput {
 
         let note = Note {
             g_d,
-            pk_d: to.pk_d.clone(),
+            pk_d: to.pk_d().clone(),
             value: value.into(),
             r: rcm,
         };
@@ -187,7 +164,38 @@ impl Default for TransparentInputs {
 struct TransparentInputs;
 
 impl TransparentInputs {
-    fn input_sum(&self) -> Amount {
+    #[cfg(feature = "transparent-inputs")]
+    fn push(
+        &mut self,
+        mtx: &mut TransactionData,
+        sk: secp256k1::SecretKey,
+        utxo: OutPoint,
+        coin: TxOut,
+    ) -> Result<(), Error> {
+        if coin.value.is_negative() {
+            return Err(Error::InvalidAmount);
+        }
+
+        let pubkey = secp256k1::PublicKey::from_secret_key(&self.secp, &sk).serialize();
+        match coin.script_pubkey.address() {
+            Some(TransparentAddress::PublicKey(hash)) => {
+                use ripemd160::Ripemd160;
+                use sha2::{Digest, Sha256};
+
+                if &hash[..] != &Ripemd160::digest(&Sha256::digest(&pubkey))[..] {
+                    return Err(Error::InvalidAddress);
+                }
+            }
+            _ => return Err(Error::InvalidAddress),
+        }
+
+        mtx.vin.push(TxIn::new(utxo));
+        self.inputs.push(TransparentInputInfo { sk, pubkey, coin });
+
+        Ok(())
+    }
+
+    fn value_sum(&self) -> Amount {
         #[cfg(feature = "transparent-inputs")]
         {
             self.inputs
@@ -201,6 +209,36 @@ impl TransparentInputs {
             Amount::zero()
         }
     }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn apply_signatures(
+        &self,
+        mtx: &mut TransactionData,
+        consensus_branch_id: consensus::BranchId,
+    ) {
+        let mut sighash = [0u8; 32];
+        for (i, info) in self.inputs.iter().enumerate() {
+            sighash.copy_from_slice(&signature_hash_data(
+                mtx,
+                consensus_branch_id,
+                SIGHASH_ALL,
+                Some((i, &info.coin.script_pubkey, info.coin.value)),
+            ));
+
+            let msg = secp256k1::Message::from_slice(&sighash).expect("32 bytes");
+            let sig = self.secp.sign(&msg, &info.sk);
+
+            // Signature has to have "SIGHASH_ALL" appended to it
+            let mut sig_bytes: Vec<u8> = sig.serialize_der()[..].to_vec();
+            sig_bytes.extend(&[SIGHASH_ALL as u8]);
+
+            // P2PKH scriptSig
+            mtx.vin[i].script_sig = Script::default() << &sig_bytes[..] << &info.pubkey[..];
+        }
+    }
+
+    #[cfg(not(feature = "transparent-inputs"))]
+    fn apply_signatures(&self, _: &mut TransactionData, _: consensus::BranchId) {}
 }
 
 /// Metadata about a transaction created by a [`Builder`].
@@ -226,7 +264,7 @@ impl TransactionMetadata {
     /// they added (via the first call to [`Builder::add_sapling_spend`]) is the first
     /// [`SpendDescription`] in the transaction.
     pub fn spend_index(&self, n: usize) -> Option<usize> {
-        self.spend_indices.get(n).map(|i| *i)
+        self.spend_indices.get(n).copied()
     }
 
     /// Returns the index within the transaction of the [`OutputDescription`] corresponding
@@ -237,7 +275,7 @@ impl TransactionMetadata {
     /// they added (via the first call to [`Builder::add_sapling_output`]) is the first
     /// [`OutputDescription`] in the transaction.
     pub fn output_index(&self, n: usize) -> Option<usize> {
-        self.output_indices.get(n).map(|i| *i)
+        self.output_indices.get(n).copied()
     }
 }
 
@@ -249,7 +287,7 @@ pub struct Builder<R: RngCore + CryptoRng> {
     anchor: Option<Fr>,
     spends: Vec<SpendDescriptionInfo>,
     outputs: Vec<SaplingOutput>,
-    legacy: TransparentInputs,
+    transparent_inputs: TransparentInputs,
     change_address: Option<(OutgoingViewingKey, PaymentAddress<Bls12>)>,
 }
 
@@ -289,32 +327,32 @@ impl<R: RngCore + CryptoRng> Builder<R> {
             anchor: None,
             spends: vec![],
             outputs: vec![],
-            legacy: TransparentInputs::default(),
+            transparent_inputs: TransparentInputs::default(),
             change_address: None,
         }
     }
 
     /// Adds a Sapling note to be spent in this transaction.
     ///
-    /// Returns an error if the given witness does not have the same anchor as previous
-    /// witnesses, or has no path.
+    /// Returns an error if the given Merkle path does not have the same anchor as the
+    /// paths for previous Sapling notes.
     pub fn add_sapling_spend(
         &mut self,
         extsk: ExtendedSpendingKey,
         diversifier: Diversifier,
         note: Note<Bls12>,
-        witness: IncrementalWitness<Node>,
+        merkle_path: MerklePath<Node>,
     ) -> Result<(), Error> {
         // Consistency check: all anchors must equal the first one
+        let cm = Node::new(note.cm(&JUBJUB).into());
         if let Some(anchor) = self.anchor {
-            let witness_root: Fr = witness.root().into();
-            if witness_root != anchor {
+            let path_root: Fr = merkle_path.root(cm).into();
+            if path_root != anchor {
                 return Err(Error::AnchorMismatch);
             }
         } else {
-            self.anchor = Some(witness.root().into())
+            self.anchor = Some(merkle_path.root(cm).into())
         }
-        let witness = witness.path().ok_or(Error::InvalidWitness)?;
 
         let alpha = Fs::random(&mut self.rng);
 
@@ -325,7 +363,7 @@ impl<R: RngCore + CryptoRng> Builder<R> {
             diversifier,
             note,
             alpha,
-            witness,
+            merkle_path,
         });
 
         Ok(())
@@ -356,29 +394,7 @@ impl<R: RngCore + CryptoRng> Builder<R> {
         utxo: OutPoint,
         coin: TxOut,
     ) -> Result<(), Error> {
-        if coin.value.is_negative() {
-            return Err(Error::InvalidAmount);
-        }
-
-        let pubkey = secp256k1::PublicKey::from_secret_key(&self.legacy.secp, &sk).serialize();
-        match coin.script_pubkey.address() {
-            Some(TransparentAddress::PublicKey(hash)) => {
-                use ripemd160::Ripemd160;
-                use sha2::{Digest, Sha256};
-
-                if &hash[..] != &Ripemd160::digest(&Sha256::digest(&pubkey))[..] {
-                    return Err(Error::InvalidAddress);
-                }
-            }
-            _ => return Err(Error::InvalidAddress),
-        }
-
-        self.mtx.vin.push(TxIn::new(utxo));
-        self.legacy
-            .inputs
-            .push(TransparentInputInfo { sk, pubkey, coin });
-
-        Ok(())
+        self.transparent_inputs.push(&mut self.mtx, sk, utxo, coin)
     }
 
     /// Adds a transparent address to send funds to.
@@ -418,8 +434,8 @@ impl<R: RngCore + CryptoRng> Builder<R> {
     /// the network.
     pub fn build(
         mut self,
-        consensus_branch_id: u32,
-        prover: impl TxProver,
+        consensus_branch_id: consensus::BranchId,
+        prover: &impl TxProver,
     ) -> Result<(Transaction, TransactionMetadata), Error> {
         let mut tx_metadata = TransactionMetadata::new();
 
@@ -428,7 +444,7 @@ impl<R: RngCore + CryptoRng> Builder<R> {
         //
 
         // Valid change
-        let change = self.mtx.value_balance - self.fee + self.legacy.input_sum()
+        let change = self.mtx.value_balance - self.fee + self.transparent_inputs.value_sum()
             - self
                 .mtx
                 .vout
@@ -451,10 +467,11 @@ impl<R: RngCore + CryptoRng> Builder<R> {
             } else if !self.spends.is_empty() {
                 (
                     self.spends[0].extsk.expsk.ovk,
-                    PaymentAddress {
-                        diversifier: self.spends[0].diversifier,
-                        pk_d: self.spends[0].note.pk_d.clone(),
-                    },
+                    PaymentAddress::from_parts(
+                        self.spends[0].diversifier,
+                        self.spends[0].note.pk_d.clone(),
+                    )
+                    .ok_or(Error::InvalidAddress)?,
                 )
             } else {
                 return Err(Error::NoChangeAddress);
@@ -494,17 +511,20 @@ impl<R: RngCore + CryptoRng> Builder<R> {
         tx_metadata.spend_indices.resize(spends.len(), 0);
         tx_metadata.output_indices.resize(orig_outputs_len, 0);
 
+        // Record if we'll need a binding signature
+        let binding_sig_needed = !spends.is_empty() || !outputs.is_empty();
+
         // Create Sapling SpendDescriptions
-        if spends.len() > 0 {
+        if !spends.is_empty() {
             let anchor = self.anchor.expect("anchor was set if spends were added");
-        
+
             for (i, (pos, spend)) in spends.iter().enumerate() {
                 let proof_generation_key = spend.extsk.expsk.proof_generation_key(&JUBJUB);
 
                 let mut nullifier = [0u8; 32];
                 nullifier.copy_from_slice(&spend.note.nf(
-                    &proof_generation_key.into_viewing_key(&JUBJUB),
-                    spend.witness.position,
+                    &proof_generation_key.to_viewing_key(&JUBJUB),
+                    spend.merkle_path.position,
                     &JUBJUB,
                 ));
 
@@ -517,13 +537,13 @@ impl<R: RngCore + CryptoRng> Builder<R> {
                         spend.alpha,
                         spend.note.value,
                         anchor,
-                        spend.witness.clone(),
+                        spend.merkle_path.clone(),
                     )
                     .map_err(|()| Error::SpendProof)?;
 
                 self.mtx.shielded_spends.push(SpendDescription {
                     cv,
-                    anchor: anchor,
+                    anchor,
                     nullifier,
                     rk,
                     zkproof,
@@ -541,7 +561,7 @@ impl<R: RngCore + CryptoRng> Builder<R> {
                 // Record the post-randomized output location
                 tx_metadata.output_indices[pos] = i;
 
-                output.build(&prover, &mut ctx, &mut self.rng)
+                output.build(prover, &mut ctx, &mut self.rng)
             } else {
                 // This is a dummy output
                 let (dummy_to, dummy_note) = {
@@ -560,16 +580,16 @@ impl<R: RngCore + CryptoRng> Builder<R> {
                         (diversifier, g_d)
                     };
 
-                    let pk_d = {
+                    let (pk_d, payment_address) = loop {
                         let dummy_ivk = Fs::random(&mut self.rng);
-                        g_d.mul(dummy_ivk, &JUBJUB)
+                        let pk_d = g_d.mul(dummy_ivk, &JUBJUB);
+                        if let Some(addr) = PaymentAddress::from_parts(diversifier, pk_d.clone()) {
+                            break (pk_d, addr);
+                        }
                     };
 
                     (
-                        PaymentAddress {
-                            diversifier,
-                            pk_d: pk_d.clone(),
-                        },
+                        payment_address,
                         Note {
                             g_d,
                             pk_d,
@@ -627,35 +647,21 @@ impl<R: RngCore + CryptoRng> Builder<R> {
                 &JUBJUB,
             ));
         }
-        self.mtx.binding_sig = Some(
-            prover
-                .binding_sig(&mut ctx, self.mtx.value_balance, &sighash)
-                .map_err(|()| Error::BindingSig)?,
-        );
+
+        // Add a binding signature if needed
+        if binding_sig_needed {
+            self.mtx.binding_sig = Some(
+                prover
+                    .binding_sig(&mut ctx, self.mtx.value_balance, &sighash)
+                    .map_err(|()| Error::BindingSig)?,
+            );
+        } else {
+            self.mtx.binding_sig = None;
+        }
 
         // Transparent signatures
-        #[cfg(feature = "transparent-inputs")]
-        {
-            for (i, info) in self.legacy.inputs.iter().enumerate() {
-                sighash.copy_from_slice(&signature_hash_data(
-                    &self.mtx,
-                    consensus_branch_id,
-                    SIGHASH_ALL,
-                    Some((i, &info.coin.script_pubkey, info.coin.value)),
-                ));
-
-                let msg = secp256k1::Message::from_slice(&sighash).expect("32 bytes");
-                let sig = self.legacy.secp.sign(&msg, &info.sk);
-
-                // Signature has to have "SIGHASH_ALL" appended to it
-                let mut sig_bytes: Vec<u8> = sig.serialize_der()[..].to_vec();
-                sig_bytes.extend(&[SIGHASH_ALL as u8]);
-
-                // P2PKH scriptSig
-                self.mtx.vin[i].script_sig =
-                    Script::default() << &sig_bytes[..] << &info.pubkey[..];
-            }
-        }
+        self.transparent_inputs
+            .apply_signatures(&mut self.mtx, consensus_branch_id);
 
         Ok((
             self.mtx.freeze().expect("Transaction should be complete"),
@@ -667,12 +673,13 @@ impl<R: RngCore + CryptoRng> Builder<R> {
 #[cfg(test)]
 mod tests {
     use ff::{Field, PrimeField};
-    use rand::rngs::OsRng;
+    use rand_core::OsRng;
 
     use crate::jubjub::fs::Fs;
 
     use super::{Builder, Error};
     use crate::{
+        consensus,
         legacy::TransparentAddress,
         merkle_tree::{CommitmentTree, IncrementalWitness},
         prover::mock::MockTxProver,
@@ -693,6 +700,109 @@ mod tests {
         assert_eq!(
             builder.add_sapling_output(ovk, to, Amount::from_i64(-1).unwrap(), None),
             Err(Error::InvalidAmount)
+        );
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    #[test]
+    fn binding_sig_absent_if_no_shielded_spend_or_output() {
+        use crate::transaction::{
+            builder::{self, TransparentInputs},
+            TransactionData,
+        };
+
+        // Create a builder with 0 fee, so we can construct t outputs
+        let mut builder = builder::Builder {
+            rng: OsRng,
+            mtx: TransactionData::new(),
+            fee: Amount::zero(),
+            anchor: None,
+            spends: vec![],
+            outputs: vec![],
+            transparent_inputs: TransparentInputs::default(),
+            change_address: None,
+        };
+
+        // Create a tx with only t output. No binding_sig should be present
+        builder
+            .add_transparent_output(&TransparentAddress::PublicKey([0; 20]), Amount::zero())
+            .unwrap();
+
+        let (tx, _) = builder
+            .build(consensus::BranchId::Sapling, &MockTxProver)
+            .unwrap();
+        // No binding signature, because only t input and outputs
+        assert!(tx.binding_sig.is_none());
+    }
+
+    #[test]
+    fn binding_sig_absent_if_no_shielded_spend_or_output() {
+        use crate::transaction::{
+            builder::{self, TransparentInputs},
+            TransactionData,
+        };
+
+        // Create a builder with 0 fee, so we can construct t outputs
+        let mut builder = builder::Builder {
+            rng: OsRng,
+            mtx: TransactionData::new(),
+            fee: Amount::zero(),
+            anchor: None,
+            spends: vec![],
+            outputs: vec![],
+            transparent_inputs: TransparentInputs::default(),
+            change_address: None,
+        };
+
+        // Create a tx with only t output. No binding_sig should be present
+        builder
+            .add_transparent_output(&TransparentAddress::PublicKey([0; 20]), Amount::zero())
+            .unwrap();
+
+        let (tx, _) = builder
+            .build(consensus::BranchId::Sapling, &MockTxProver)
+            .unwrap();
+        // No binding signature, because only t input and outputs
+        assert!(tx.binding_sig.is_none());
+    }
+
+    #[test]
+    fn binding_sig_present_if_shielded_spend() {
+        let extsk = ExtendedSpendingKey::master(&[]);
+        let extfvk = ExtendedFullViewingKey::from(&extsk);
+        let to = extfvk.default_address().unwrap().1;
+
+        let mut rng = OsRng;
+
+        let note1 = to
+            .create_note(50000, Fs::random(&mut rng), &JUBJUB)
+            .unwrap();
+        let cm1 = Node::new(note1.cm(&JUBJUB).to_repr());
+        let mut tree = CommitmentTree::new();
+        tree.append(cm1).unwrap();
+        let witness1 = IncrementalWitness::from_tree(&tree);
+
+        let mut builder = Builder::new(0);
+
+        // Create a tx with a sapling spend. binding_sig should be present
+        builder
+            .add_sapling_spend(
+                extsk.clone(),
+                *to.diversifier(),
+                note1.clone(),
+                witness1.path().unwrap(),
+            )
+            .unwrap();
+
+        builder
+            .add_transparent_output(&TransparentAddress::PublicKey([0; 20]), Amount::zero())
+            .unwrap();
+
+        // Expect a binding signature error, because our inputs aren't valid, but this shows
+        // that a binding signature was attempted
+        assert_eq!(
+            builder.build(consensus::BranchId::Sapling, &MockTxProver),
+            Err(Error::BindingSig)
         );
     }
 
@@ -720,7 +830,7 @@ mod tests {
         {
             let builder = Builder::new(0);
             assert_eq!(
-                builder.build(1, MockTxProver),
+                builder.build(consensus::BranchId::Sapling, &MockTxProver),
                 Err(Error::ChangeIsNegative(Amount::from_i64(-10000).unwrap()))
             );
         }
@@ -742,7 +852,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(
-                builder.build(1, MockTxProver),
+                builder.build(consensus::BranchId::Sapling, &MockTxProver),
                 Err(Error::ChangeIsNegative(Amount::from_i64(-60000).unwrap()))
             );
         }
@@ -758,7 +868,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(
-                builder.build(1, MockTxProver),
+                builder.build(consensus::BranchId::Sapling, &MockTxProver),
                 Err(Error::ChangeIsNegative(Amount::from_i64(-60000).unwrap()))
             );
         }
@@ -766,7 +876,7 @@ mod tests {
         let note1 = to
             .create_note(59999, Fs::random(&mut rng), &JUBJUB)
             .unwrap();
-        let cm1 = Node::new(note1.cm(&JUBJUB).into_repr());
+        let cm1 = Node::new(note1.cm(&JUBJUB).to_repr());
         let mut tree = CommitmentTree::new();
         tree.append(cm1).unwrap();
         let mut witness1 = IncrementalWitness::from_tree(&tree);
@@ -778,9 +888,9 @@ mod tests {
             builder
                 .add_sapling_spend(
                     extsk.clone(),
-                    to.diversifier,
+                    *to.diversifier(),
                     note1.clone(),
-                    witness1.clone(),
+                    witness1.path().unwrap(),
                 )
                 .unwrap();
             builder
@@ -798,13 +908,13 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(
-                builder.build(1, MockTxProver),
+                builder.build(consensus::BranchId::Sapling, &MockTxProver),
                 Err(Error::ChangeIsNegative(Amount::from_i64(-1).unwrap()))
             );
         }
 
         let note2 = to.create_note(1, Fs::random(&mut rng), &JUBJUB).unwrap();
-        let cm2 = Node::new(note2.cm(&JUBJUB).into_repr());
+        let cm2 = Node::new(note2.cm(&JUBJUB).to_repr());
         tree.append(cm2).unwrap();
         witness1.append(cm2).unwrap();
         let witness2 = IncrementalWitness::from_tree(&tree);
@@ -817,10 +927,15 @@ mod tests {
         {
             let mut builder = Builder::new(0);
             builder
-                .add_sapling_spend(extsk.clone(), to.diversifier, note1, witness1)
+                .add_sapling_spend(
+                    extsk.clone(),
+                    *to.diversifier(),
+                    note1,
+                    witness1.path().unwrap(),
+                )
                 .unwrap();
             builder
-                .add_sapling_spend(extsk, to.diversifier, note2, witness2)
+                .add_sapling_spend(extsk, *to.diversifier(), note2, witness2.path().unwrap())
                 .unwrap();
             builder
                 .add_sapling_output(ovk, to, Amount::from_u64(30000).unwrap(), None)
@@ -831,7 +946,10 @@ mod tests {
                     Amount::from_u64(20000).unwrap(),
                 )
                 .unwrap();
-            assert_eq!(builder.build(1, MockTxProver), Err(Error::BindingSig))
+            assert_eq!(
+                builder.build(consensus::BranchId::Sapling, &MockTxProver),
+                Err(Error::BindingSig)
+            )
         }
     }
 }

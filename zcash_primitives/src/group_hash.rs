@@ -1,9 +1,13 @@
-use jubjub::{edwards, JubjubEngine, PrimeOrder};
+//! Implementation of [group hashing into Jubjub][grouphash].
+//!
+//! [grouphash]: https://zips.z.cash/protocol/protocol.pdf#concretegrouphashjubjub
+
+use crate::jubjub::{edwards, JubjubEngine, PrimeOrder};
 
 use ff::PrimeField;
 
+use crate::constants;
 use blake2s_simd::Params;
-use constants;
 
 /// Produces a random point in the Jubjub curve.
 /// The point is guaranteed to be prime order

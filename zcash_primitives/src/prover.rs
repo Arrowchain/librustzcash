@@ -7,7 +7,7 @@ use crate::{
 use pairing::bls12_381::{Bls12, Fr};
 
 use crate::{
-    merkle_tree::CommitmentTreeWitness,
+    merkle_tree::MerklePath,
     redjubjub::{PublicKey, Signature},
     sapling::Node,
     transaction::components::{Amount, GROTH_PROOF_SIZE},
@@ -35,7 +35,7 @@ pub trait TxProver {
         ar: Fs,
         value: u64,
         anchor: Fr,
-        witness: CommitmentTreeWitness<Node>,
+        merkle_path: MerklePath<Node>,
     ) -> Result<
         (
             [u8; GROTH_PROOF_SIZE],
@@ -74,7 +74,7 @@ pub trait TxProver {
 pub(crate) mod mock {
     use ff::Field;
     use pairing::bls12_381::{Bls12, Fr};
-    use rand_os::OsRng;
+    use rand_core::OsRng;
 
     use crate::{
         jubjub::{edwards, fs::Fs, FixedGenerators, Unknown},
@@ -82,7 +82,7 @@ pub(crate) mod mock {
     };
 
     use crate::{
-        merkle_tree::CommitmentTreeWitness,
+        merkle_tree::MerklePath,
         redjubjub::{PublicKey, Signature},
         sapling::Node,
         transaction::components::{Amount, GROTH_PROOF_SIZE},
@@ -108,7 +108,7 @@ pub(crate) mod mock {
             ar: Fs,
             value: u64,
             _anchor: Fr,
-            _witness: CommitmentTreeWitness<Node>,
+            _merkle_path: MerklePath<Node>,
         ) -> Result<
             (
                 [u8; GROTH_PROOF_SIZE],

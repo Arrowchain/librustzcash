@@ -1,3 +1,5 @@
+//! Structs and methods for handling Zcash transactions.
+
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use hex;
 use sha2::{Digest, Sha256};
@@ -5,8 +7,8 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::ops::Deref;
 
-use redjubjub::Signature;
-use serialize::Vector;
+use crate::redjubjub::Signature;
+use crate::serialize::Vector;
 
 pub mod builder;
 pub mod components;
@@ -28,8 +30,8 @@ const SAPLING_TX_VERSION: u32 = 4;
 pub struct TxId(pub [u8; 32]);
 
 impl fmt::Display for TxId {
-    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        let mut data = self.0.clone();
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut data = self.0;
         data.reverse();
         formatter.write_str(&hex::encode(data))
     }
@@ -74,7 +76,7 @@ pub struct TransactionData {
 }
 
 impl std::fmt::Debug for TransactionData {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         write!(
             f,
             "TransactionData(
@@ -164,9 +166,10 @@ impl Transaction {
         let overwintered = (header >> 31) == 1;
         let version = header & 0x7FFFFFFF;
 
-        let version_group_id = match overwintered {
-            true => reader.read_u32::<LittleEndian>()?,
-            false => 0,
+        let version_group_id = if overwintered {
+            reader.read_u32::<LittleEndian>()?
+        } else {
+            0
         };
 
         let is_overwinter_v3 = overwintered
@@ -185,9 +188,10 @@ impl Transaction {
         let vin = Vector::read(&mut reader, TxIn::read)?;
         let vout = Vector::read(&mut reader, TxOut::read)?;
         let lock_time = reader.read_u32::<LittleEndian>()?;
-        let expiry_height = match is_overwinter_v3 || is_sapling_v4 {
-            true => reader.read_u32::<LittleEndian>()?,
-            false => 0,
+        let expiry_height = if is_overwinter_v3 || is_sapling_v4 {
+            reader.read_u32::<LittleEndian>()?
+        } else {
+            0
         };
 
         let (value_balance, shielded_spends, shielded_outputs) = if is_sapling_v4 {
@@ -223,9 +227,10 @@ impl Transaction {
         };
 
         let binding_sig =
-            match is_sapling_v4 && !(shielded_spends.is_empty() && shielded_outputs.is_empty()) {
-                true => Some(Signature::read(&mut reader)?),
-                false => None,
+            if is_sapling_v4 && !(shielded_spends.is_empty() && shielded_outputs.is_empty()) {
+                Some(Signature::read(&mut reader)?)
+            } else {
+                None
             };
 
         Transaction::from_data(TransactionData {

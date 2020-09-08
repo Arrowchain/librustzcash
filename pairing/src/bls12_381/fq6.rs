@@ -2,9 +2,11 @@ use super::fq::{FROBENIUS_COEFF_FQ6_C1, FROBENIUS_COEFF_FQ6_C2};
 use super::fq2::Fq2;
 use ff::Field;
 use rand_core::RngCore;
+use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use subtle::{Choice, ConditionallySelectable, CtOption};
 
 /// An element of Fq6, represented by c0 + c1 * v + c2 * v^(2).
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Fq6 {
     pub c0: Fq2,
     pub c1: Fq2,
@@ -12,7 +14,7 @@ pub struct Fq6 {
 }
 
 impl ::std::fmt::Display for Fq6 {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
         write!(f, "Fq6({} + {} * v, {} * v^2)", self.c0, self.c1, self.c2)
     }
 }
@@ -97,62 +99,8 @@ impl Fq6 {
         self.c1 = t2;
         self.c2 = t3;
     }
-}
 
-impl Field for Fq6 {
-    fn random<R: RngCore>(rng: &mut R) -> Self {
-        Fq6 {
-            c0: Fq2::random(rng),
-            c1: Fq2::random(rng),
-            c2: Fq2::random(rng),
-        }
-    }
-
-    fn zero() -> Self {
-        Fq6 {
-            c0: Fq2::zero(),
-            c1: Fq2::zero(),
-            c2: Fq2::zero(),
-        }
-    }
-
-    fn one() -> Self {
-        Fq6 {
-            c0: Fq2::one(),
-            c1: Fq2::zero(),
-            c2: Fq2::zero(),
-        }
-    }
-
-    fn is_zero(&self) -> bool {
-        self.c0.is_zero() && self.c1.is_zero() && self.c2.is_zero()
-    }
-
-    fn double(&mut self) {
-        self.c0.double();
-        self.c1.double();
-        self.c2.double();
-    }
-
-    fn negate(&mut self) {
-        self.c0.negate();
-        self.c1.negate();
-        self.c2.negate();
-    }
-
-    fn add_assign(&mut self, other: &Self) {
-        self.c0.add_assign(&other.c0);
-        self.c1.add_assign(&other.c1);
-        self.c2.add_assign(&other.c2);
-    }
-
-    fn sub_assign(&mut self, other: &Self) {
-        self.c0.sub_assign(&other.c0);
-        self.c1.sub_assign(&other.c1);
-        self.c2.sub_assign(&other.c2);
-    }
-
-    fn frobenius_map(&mut self, power: usize) {
+    pub fn frobenius_map(&mut self, power: usize) {
         self.c0.frobenius_map(power);
         self.c1.frobenius_map(power);
         self.c2.frobenius_map(power);
@@ -160,40 +108,117 @@ impl Field for Fq6 {
         self.c1.mul_assign(&FROBENIUS_COEFF_FQ6_C1[power % 6]);
         self.c2.mul_assign(&FROBENIUS_COEFF_FQ6_C2[power % 6]);
     }
+}
 
-    fn square(&mut self) {
-        let mut s0 = self.c0;
-        s0.square();
-        let mut ab = self.c0;
-        ab.mul_assign(&self.c1);
-        let mut s1 = ab;
-        s1.double();
-        let mut s2 = self.c0;
-        s2.sub_assign(&self.c1);
-        s2.add_assign(&self.c2);
-        s2.square();
-        let mut bc = self.c1;
-        bc.mul_assign(&self.c2);
-        let mut s3 = bc;
-        s3.double();
-        let mut s4 = self.c2;
-        s4.square();
-
-        self.c0 = s3;
-        self.c0.mul_by_nonresidue();
-        self.c0.add_assign(&s0);
-
-        self.c1 = s4;
-        self.c1.mul_by_nonresidue();
-        self.c1.add_assign(&s1);
-
-        self.c2 = s1;
-        self.c2.add_assign(&s2);
-        self.c2.add_assign(&s3);
-        self.c2.sub_assign(&s0);
-        self.c2.sub_assign(&s4);
+impl ConditionallySelectable for Fq6 {
+    fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
+        Fq6 {
+            c0: Fq2::conditional_select(&a.c0, &b.c0, choice),
+            c1: Fq2::conditional_select(&a.c1, &b.c1, choice),
+            c2: Fq2::conditional_select(&a.c2, &b.c2, choice),
+        }
     }
+}
 
+impl Neg for Fq6 {
+    type Output = Self;
+
+    fn neg(self) -> Self {
+        Fq6 {
+            c0: self.c0.neg(),
+            c1: self.c1.neg(),
+            c2: self.c2.neg(),
+        }
+    }
+}
+
+impl<'r> Add<&'r Fq6> for Fq6 {
+    type Output = Self;
+
+    fn add(self, other: &Self) -> Self {
+        Fq6 {
+            c0: self.c0 + other.c0,
+            c1: self.c1 + other.c1,
+            c2: self.c2 + other.c2,
+        }
+    }
+}
+
+impl Add for Fq6 {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        self.add(&other)
+    }
+}
+
+impl<'r> AddAssign<&'r Fq6> for Fq6 {
+    fn add_assign(&mut self, other: &'r Self) {
+        self.c0.add_assign(&other.c0);
+        self.c1.add_assign(&other.c1);
+        self.c2.add_assign(&other.c2);
+    }
+}
+
+impl AddAssign for Fq6 {
+    fn add_assign(&mut self, other: Self) {
+        self.add_assign(&other);
+    }
+}
+
+impl<'r> Sub<&'r Fq6> for Fq6 {
+    type Output = Self;
+
+    fn sub(self, other: &Self) -> Self {
+        Fq6 {
+            c0: self.c0 - other.c0,
+            c1: self.c1 - other.c1,
+            c2: self.c2 - other.c2,
+        }
+    }
+}
+
+impl Sub for Fq6 {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        self.sub(&other)
+    }
+}
+
+impl<'r> SubAssign<&'r Fq6> for Fq6 {
+    fn sub_assign(&mut self, other: &'r Self) {
+        self.c0.sub_assign(&other.c0);
+        self.c1.sub_assign(&other.c1);
+        self.c2.sub_assign(&other.c2);
+    }
+}
+
+impl SubAssign for Fq6 {
+    fn sub_assign(&mut self, other: Self) {
+        self.sub_assign(&other);
+    }
+}
+
+impl<'r> Mul<&'r Fq6> for Fq6 {
+    type Output = Self;
+
+    fn mul(self, other: &Self) -> Self {
+        let mut ret = self;
+        ret.mul_assign(other);
+        ret
+    }
+}
+
+impl Mul for Fq6 {
+    type Output = Self;
+
+    fn mul(self, other: Self) -> Self {
+        self.mul(&other)
+    }
+}
+
+impl<'r> MulAssign<&'r Fq6> for Fq6 {
     fn mul_assign(&mut self, other: &Self) {
         let mut a_a = self.c0;
         let mut b_b = self.c1;
@@ -244,27 +269,99 @@ impl Field for Fq6 {
         self.c1 = t2;
         self.c2 = t3;
     }
+}
 
-    fn inverse(&self) -> Option<Self> {
+impl MulAssign for Fq6 {
+    fn mul_assign(&mut self, other: Self) {
+        self.mul_assign(&other);
+    }
+}
+
+impl Field for Fq6 {
+    fn random<R: RngCore + ?std::marker::Sized>(rng: &mut R) -> Self {
+        Fq6 {
+            c0: Fq2::random(rng),
+            c1: Fq2::random(rng),
+            c2: Fq2::random(rng),
+        }
+    }
+
+    fn zero() -> Self {
+        Fq6 {
+            c0: Fq2::zero(),
+            c1: Fq2::zero(),
+            c2: Fq2::zero(),
+        }
+    }
+
+    fn one() -> Self {
+        Fq6 {
+            c0: Fq2::one(),
+            c1: Fq2::zero(),
+            c2: Fq2::zero(),
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        self.c0.is_zero() && self.c1.is_zero() && self.c2.is_zero()
+    }
+
+    fn double(&self) -> Self {
+        Fq6 {
+            c0: self.c0.double(),
+            c1: self.c1.double(),
+            c2: self.c2.double(),
+        }
+    }
+
+    fn square(&self) -> Self {
+        let s0 = self.c0.square();
+        let mut ab = self.c0;
+        ab.mul_assign(&self.c1);
+        let s1 = ab.double();
+        let mut s2 = self.c0;
+        s2.sub_assign(&self.c1);
+        s2.add_assign(&self.c2);
+        s2 = s2.square();
+        let mut bc = self.c1;
+        bc.mul_assign(&self.c2);
+        let s3 = bc.double();
+        let s4 = self.c2.square();
+
+        let mut c0 = s3;
+        c0.mul_by_nonresidue();
+        c0.add_assign(&s0);
+
+        let mut c1 = s4;
+        c1.mul_by_nonresidue();
+        c1.add_assign(&s1);
+
+        let mut c2 = s1;
+        c2.add_assign(&s2);
+        c2.add_assign(&s3);
+        c2.sub_assign(&s0);
+        c2.sub_assign(&s4);
+
+        Fq6 { c0, c1, c2 }
+    }
+
+    fn invert(&self) -> CtOption<Self> {
         let mut c0 = self.c2;
         c0.mul_by_nonresidue();
         c0.mul_assign(&self.c1);
-        c0.negate();
+        c0 = c0.neg();
         {
-            let mut c0s = self.c0;
-            c0s.square();
+            let c0s = self.c0.square();
             c0.add_assign(&c0s);
         }
-        let mut c1 = self.c2;
-        c1.square();
+        let mut c1 = self.c2.square();
         c1.mul_by_nonresidue();
         {
             let mut c01 = self.c0;
             c01.mul_assign(&self.c1);
             c1.sub_assign(&c01);
         }
-        let mut c2 = self.c1;
-        c2.square();
+        let mut c2 = self.c1.square();
         {
             let mut c02 = self.c0;
             c02.mul_assign(&self.c2);
@@ -281,21 +378,22 @@ impl Field for Fq6 {
         tmp2.mul_assign(&c0);
         tmp1.add_assign(&tmp2);
 
-        match tmp1.inverse() {
-            Some(t) => {
-                let mut tmp = Fq6 {
-                    c0: t,
-                    c1: t,
-                    c2: t,
-                };
-                tmp.c0.mul_assign(&c0);
-                tmp.c1.mul_assign(&c1);
-                tmp.c2.mul_assign(&c2);
+        tmp1.invert().map(|t| {
+            let mut tmp = Fq6 {
+                c0: t,
+                c1: t,
+                c2: t,
+            };
+            tmp.c0.mul_assign(&c0);
+            tmp.c1.mul_assign(&c1);
+            tmp.c2.mul_assign(&c2);
 
-                Some(tmp)
-            }
-            None => None,
-        }
+            tmp
+        })
+    }
+
+    fn sqrt(&self) -> CtOption<Self> {
+        unimplemented!()
     }
 }
 
@@ -376,8 +474,5 @@ fn test_fq6_mul_by_01() {
 
 #[test]
 fn fq6_field_tests() {
-    use ff::PrimeField;
-
-    ::tests::field::random_field_tests::<Fq6>();
-    ::tests::field::random_frobenius_tests::<Fq6, _>(super::fq::Fq::char(), 13);
+    crate::tests::field::random_field_tests::<Fq6>();
 }

@@ -1,10 +1,12 @@
-use ff::{Field, PrimeField, PrimeFieldRepr};
-use pairing::Engine;
+//! Helpers for testing circuit implementations.
+
+use ff::{Endianness, Field, PrimeField, ScalarEngine};
 
 use crate::{ConstraintSystem, Index, LinearCombination, SynthesisError, Variable};
 
 use std::collections::HashMap;
 use std::fmt::Write;
+use std::ops::{AddAssign, MulAssign, Neg};
 
 use byteorder::{BigEndian, ByteOrder};
 use std::cmp::Ordering;
@@ -20,7 +22,7 @@ enum NamedObject {
 }
 
 /// Constraint system for testing purposes.
-pub struct TestConstraintSystem<E: Engine> {
+pub struct TestConstraintSystem<E: ScalarEngine> {
     named_objects: HashMap<String, NamedObject>,
     current_namespace: Vec<String>,
     constraints: Vec<(
@@ -62,11 +64,11 @@ impl Ord for OrderedVariable {
     }
 }
 
-fn proc_lc<E: Engine>(terms: &[(Variable, E::Fr)]) -> BTreeMap<OrderedVariable, E::Fr> {
+fn proc_lc<E: ScalarEngine>(terms: &[(Variable, E::Fr)]) -> BTreeMap<OrderedVariable, E::Fr> {
     let mut map = BTreeMap::new();
     for &(var, coeff) in terms {
         map.entry(OrderedVariable(var))
-            .or_insert(E::Fr::zero())
+            .or_insert_with(E::Fr::zero)
             .add_assign(&coeff);
     }
 
@@ -85,7 +87,7 @@ fn proc_lc<E: Engine>(terms: &[(Variable, E::Fr)]) -> BTreeMap<OrderedVariable, 
     map
 }
 
-fn hash_lc<E: Engine>(terms: &[(Variable, E::Fr)], h: &mut Blake2sState) {
+fn hash_lc<E: ScalarEngine>(terms: &[(Variable, E::Fr)], h: &mut Blake2sState) {
     let map = proc_lc::<E>(terms);
 
     let mut buf = [0u8; 9 + 32];
@@ -104,13 +106,16 @@ fn hash_lc<E: Engine>(terms: &[(Variable, E::Fr)], h: &mut Blake2sState) {
             }
         }
 
-        coeff.into_repr().write_be(&mut buf[9..]).unwrap();
+        let mut coeff_repr = coeff.to_repr();
+        <E::Fr as PrimeField>::ReprEndianness::toggle_little_endian(&mut coeff_repr);
+        let coeff_be: Vec<_> = coeff_repr.as_ref().iter().cloned().rev().collect();
+        buf[9..].copy_from_slice(&coeff_be[..]);
 
         h.update(&buf);
     }
 }
 
-fn eval_lc<E: Engine>(
+fn eval_lc<E: ScalarEngine>(
     terms: &[(Variable, E::Fr)],
     inputs: &[(E::Fr, String)],
     aux: &[(E::Fr, String)],
@@ -130,7 +135,7 @@ fn eval_lc<E: Engine>(
     acc
 }
 
-impl<E: Engine> TestConstraintSystem<E> {
+impl<E: ScalarEngine> TestConstraintSystem<E> {
     pub fn new() -> TestConstraintSystem<E> {
         let mut map = HashMap::new();
         map.insert(
@@ -150,14 +155,10 @@ impl<E: Engine> TestConstraintSystem<E> {
     pub fn pretty_print(&self) -> String {
         let mut s = String::new();
 
-        let negone = {
-            let mut tmp = E::Fr::one();
-            tmp.negate();
-            tmp
-        };
+        let negone = E::Fr::one().neg();
 
         let powers_of_two = (0..E::Fr::NUM_BITS)
-            .map(|i| E::Fr::from_str("2").unwrap().pow(&[i as u64]))
+            .map(|i| E::Fr::from_str("2").unwrap().pow_vartime(&[u64::from(i)]))
             .collect::<Vec<_>>();
 
         let pp = |s: &mut String, lc: &LinearCombination<E>| {
@@ -286,7 +287,7 @@ impl<E: Engine> TestConstraintSystem<E> {
             }
         }
 
-        return true;
+        true
     }
 
     pub fn num_inputs(&self) -> usize {
@@ -344,7 +345,7 @@ fn compute_path(ns: &[String], this: String) -> String {
     name
 }
 
-impl<E: Engine> ConstraintSystem<E> for TestConstraintSystem<E> {
+impl<E: ScalarEngine> ConstraintSystem<E> for TestConstraintSystem<E> {
     type Root = Self;
 
     fn alloc<F, A, AR>(&mut self, annotation: A, f: F) -> Result<Variable, SynthesisError>

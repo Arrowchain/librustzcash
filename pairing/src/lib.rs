@@ -1,3 +1,5 @@
+//! A library for working with pairing-friendly curves.
+
 // `clippy` is a code linting tool for improving code quality by catching
 // common mistakes or strange code patterns. If the `cargo-clippy` feature
 // is provided, all compiler warnings are prohibited.
@@ -8,36 +10,29 @@
 #![cfg_attr(feature = "cargo-clippy", allow(clippy::many_single_char_names))]
 #![cfg_attr(feature = "cargo-clippy", allow(clippy::new_without_default))]
 #![cfg_attr(feature = "cargo-clippy", allow(clippy::write_literal))]
+// Catch documentation errors caused by code changes.
+#![deny(intra_doc_link_resolution_failure)]
 // Force public structures to implement Debug
 #![deny(missing_debug_implementations)]
-
-extern crate byteorder;
-extern crate ff;
-extern crate group;
-extern crate rand_core;
-
-#[cfg(test)]
-extern crate rand_xorshift;
 
 #[cfg(test)]
 pub mod tests;
 
 pub mod bls12_381;
 
-use ff::{Field, PrimeField, ScalarEngine, SqrtField};
-use group::{CurveAffine, CurveProjective};
+use ff::{Field, PrimeField, ScalarEngine};
+use group::{CurveAffine, CurveOps, CurveOpsOwned, CurveProjective};
+use subtle::CtOption;
 
 /// An "engine" is a collection of types (fields, elliptic curve groups, etc.)
 /// with well-defined relationships. In particular, the G1/G2 curve groups are
 /// of prime order `r`, and are equipped with a bilinear pairing function.
 pub trait Engine: ScalarEngine {
     /// The projective representation of an element in G1.
-    type G1: CurveProjective<
-            Engine = Self,
-            Base = Self::Fq,
-            Scalar = Self::Fr,
-            Affine = Self::G1Affine,
-        > + From<Self::G1Affine>;
+    type G1: CurveProjective<Engine = Self, Base = Self::Fq, Scalar = Self::Fr, Affine = Self::G1Affine>
+        + From<Self::G1Affine>
+        + CurveOps<Self::G1Affine>
+        + CurveOpsOwned<Self::G1Affine>;
 
     /// The affine representation of an element in G1.
     type G1Affine: PairingCurveAffine<
@@ -50,12 +45,10 @@ pub trait Engine: ScalarEngine {
         > + From<Self::G1>;
 
     /// The projective representation of an element in G2.
-    type G2: CurveProjective<
-            Engine = Self,
-            Base = Self::Fqe,
-            Scalar = Self::Fr,
-            Affine = Self::G2Affine,
-        > + From<Self::G2Affine>;
+    type G2: CurveProjective<Engine = Self, Base = Self::Fqe, Scalar = Self::Fr, Affine = Self::G2Affine>
+        + From<Self::G2Affine>
+        + CurveOps<Self::G2Affine>
+        + CurveOpsOwned<Self::G2Affine>;
 
     /// The affine representation of an element in G2.
     type G2Affine: PairingCurveAffine<
@@ -68,10 +61,10 @@ pub trait Engine: ScalarEngine {
         > + From<Self::G2>;
 
     /// The base field that hosts G1.
-    type Fq: PrimeField + SqrtField;
+    type Fq: PrimeField;
 
     /// The extension field that hosts G2.
-    type Fqe: SqrtField;
+    type Fqe: Field;
 
     /// The extension field that hosts the target group of the pairing.
     type Fqk: Field;
@@ -87,7 +80,7 @@ pub trait Engine: ScalarEngine {
         >;
 
     /// Perform final exponentiation of the result of a miller loop.
-    fn final_exponentiation(&Self::Fqk) -> Option<Self::Fqk>;
+    fn final_exponentiation(_: &Self::Fqk) -> CtOption<Self::Fqk>;
 
     /// Performs a complete pairing operation `(p, q)`.
     fn pairing<G1, G2>(p: G1, q: G2) -> Self::Fqk

@@ -1,29 +1,58 @@
-extern crate ff;
-extern crate rand;
-extern crate rand_xorshift;
+// Catch documentation errors caused by code changes.
+#![deny(intra_doc_link_resolution_failure)]
 
-use ff::{PrimeField, PrimeFieldDecodingError, ScalarEngine, SqrtField};
+use ff::{Field, PrimeField, ScalarEngine};
 use rand::RngCore;
 use std::error::Error;
 use std::fmt;
+use std::ops::{Add, AddAssign, Neg, Sub, SubAssign};
 
 pub mod tests;
 
 mod wnaf;
 pub use self::wnaf::Wnaf;
 
+/// A helper trait for types implementing group addition.
+pub trait CurveOps<Rhs = Self, Output = Self>:
+    Add<Rhs, Output = Output> + Sub<Rhs, Output = Output> + AddAssign<Rhs> + SubAssign<Rhs>
+{
+}
+
+impl<T, Rhs, Output> CurveOps<Rhs, Output> for T where
+    T: Add<Rhs, Output = Output> + Sub<Rhs, Output = Output> + AddAssign<Rhs> + SubAssign<Rhs>
+{
+}
+
+/// A helper trait for references implementing group addition.
+pub trait CurveOpsOwned<Rhs = Self, Output = Self>: for<'r> CurveOps<&'r Rhs, Output> {}
+impl<T, Rhs, Output> CurveOpsOwned<Rhs, Output> for T where T: for<'r> CurveOps<&'r Rhs, Output> {}
+
 /// Projective representation of an elliptic curve point guaranteed to be
 /// in the correct prime order subgroup.
 pub trait CurveProjective:
-    PartialEq + Eq + Sized + Copy + Clone + Send + Sync + fmt::Debug + fmt::Display + 'static
+    PartialEq
+    + Eq
+    + Sized
+    + Copy
+    + Clone
+    + Send
+    + Sync
+    + fmt::Debug
+    + fmt::Display
+    + 'static
+    + Neg<Output = Self>
+    + CurveOps
+    + CurveOpsOwned
+    + CurveOps<<Self as CurveProjective>::Affine>
+    + CurveOpsOwned<<Self as CurveProjective>::Affine>
 {
     type Engine: ScalarEngine<Fr = Self::Scalar>;
-    type Scalar: PrimeField + SqrtField;
-    type Base: SqrtField;
+    type Scalar: PrimeField;
+    type Base: Field;
     type Affine: CurveAffine<Projective = Self, Scalar = Self::Scalar>;
 
     /// Returns an element chosen uniformly at random using a user-provided RNG.
-    fn random<R: RngCore>(rng: &mut R) -> Self;
+    fn random<R: RngCore + ?std::marker::Sized>(rng: &mut R) -> Self;
 
     /// Returns the additive identity.
     fn zero() -> Self;
@@ -45,22 +74,6 @@ pub trait CurveProjective:
     /// Doubles this element.
     fn double(&mut self);
 
-    /// Adds another element to this element.
-    fn add_assign(&mut self, other: &Self);
-
-    /// Subtracts another element from this element.
-    fn sub_assign(&mut self, other: &Self) {
-        let mut tmp = *other;
-        tmp.negate();
-        self.add_assign(&tmp);
-    }
-
-    /// Adds an affine element to this element.
-    fn add_assign_mixed(&mut self, other: &Self::Affine);
-
-    /// Negates this element.
-    fn negate(&mut self);
-
     /// Performs scalar multiplication of this element.
     fn mul_assign<S: Into<<Self::Scalar as PrimeField>::Repr>>(&mut self, other: S);
 
@@ -69,7 +82,7 @@ pub trait CurveProjective:
 
     /// Recommends a wNAF window table size given a scalar. Always returns a number
     /// between 2 and 22, inclusive.
-    fn recommended_wnaf_for_scalar(scalar: <Self::Scalar as PrimeField>::Repr) -> usize;
+    fn recommended_wnaf_for_scalar(scalar: &Self::Scalar) -> usize;
 
     /// Recommends a wNAF window size given the number of scalars you intend to multiply
     /// a base by. Always returns a number between 2 and 22, inclusive.
@@ -79,11 +92,21 @@ pub trait CurveProjective:
 /// Affine representation of an elliptic curve point guaranteed to be
 /// in the correct prime order subgroup.
 pub trait CurveAffine:
-    Copy + Clone + Sized + Send + Sync + fmt::Debug + fmt::Display + PartialEq + Eq + 'static
+    Copy
+    + Clone
+    + Sized
+    + Send
+    + Sync
+    + fmt::Debug
+    + fmt::Display
+    + PartialEq
+    + Eq
+    + 'static
+    + Neg<Output = Self>
 {
     type Engine: ScalarEngine<Fr = Self::Scalar>;
-    type Scalar: PrimeField + SqrtField;
-    type Base: SqrtField;
+    type Scalar: PrimeField;
+    type Base: Field;
     type Projective: CurveProjective<Affine = Self, Scalar = Self::Scalar>;
     type Uncompressed: EncodedPoint<Affine = Self>;
     type Compressed: EncodedPoint<Affine = Self>;
@@ -97,9 +120,6 @@ pub trait CurveAffine:
     /// Determines if this point represents the point at infinity; the
     /// additive identity.
     fn is_zero(&self) -> bool;
-
-    /// Negates this element.
-    fn negate(&mut self);
 
     /// Performs scalar multiplication of this element with mixed addition.
     fn mul<S: Into<<Self::Scalar as PrimeField>::Repr>>(&self, other: S) -> Self::Projective;
@@ -158,7 +178,7 @@ pub enum GroupDecodingError {
     /// The element is not part of the r-order subgroup.
     NotInSubgroup,
     /// One of the coordinates could not be decoded
-    CoordinateDecodingError(&'static str, PrimeFieldDecodingError),
+    CoordinateDecodingError(&'static str),
     /// The compression mode of the encoded element was not as expected
     UnexpectedCompressionMode,
     /// The encoding contained bits that should not have been set
@@ -180,10 +200,10 @@ impl Error for GroupDecodingError {
 }
 
 impl fmt::Display for GroupDecodingError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match *self {
-            GroupDecodingError::CoordinateDecodingError(description, ref err) => {
-                write!(f, "{} decoding error: {}", description, err)
+            GroupDecodingError::CoordinateDecodingError(description) => {
+                write!(f, "{} decoding error", description)
             }
             _ => write!(f, "{}", self.description()),
         }

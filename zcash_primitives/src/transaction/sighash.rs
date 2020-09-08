@@ -1,21 +1,21 @@
 use blake2b_simd::{Hash as Blake2bHash, Params as Blake2bParams};
 use byteorder::{LittleEndian, WriteBytesExt};
-use ff::{PrimeField, PrimeFieldRepr};
+use ff::PrimeField;
 
 use super::{
     components::{Amount, TxOut},
     Transaction, TransactionData, OVERWINTER_VERSION_GROUP_ID, SAPLING_TX_VERSION,
     SAPLING_VERSION_GROUP_ID,
 };
-use legacy::Script;
+use crate::{consensus, legacy::Script};
 
-const ZCASH_SIGHASH_PERSONALIZATION_PREFIX: &'static [u8; 12] = b"ZcashSigHash";
-const ZCASH_PREVOUTS_HASH_PERSONALIZATION: &'static [u8; 16] = b"ZcashPrevoutHash";
-const ZCASH_SEQUENCE_HASH_PERSONALIZATION: &'static [u8; 16] = b"ZcashSequencHash";
-const ZCASH_OUTPUTS_HASH_PERSONALIZATION: &'static [u8; 16] = b"ZcashOutputsHash";
-const ZCASH_JOINSPLITS_HASH_PERSONALIZATION: &'static [u8; 16] = b"ZcashJSplitsHash";
-const ZCASH_SHIELDED_SPENDS_HASH_PERSONALIZATION: &'static [u8; 16] = b"ZcashSSpendsHash";
-const ZCASH_SHIELDED_OUTPUTS_HASH_PERSONALIZATION: &'static [u8; 16] = b"ZcashSOutputHash";
+const ZCASH_SIGHASH_PERSONALIZATION_PREFIX: &[u8; 12] = b"ZcashSigHash";
+const ZCASH_PREVOUTS_HASH_PERSONALIZATION: &[u8; 16] = b"ZcashPrevoutHash";
+const ZCASH_SEQUENCE_HASH_PERSONALIZATION: &[u8; 16] = b"ZcashSequencHash";
+const ZCASH_OUTPUTS_HASH_PERSONALIZATION: &[u8; 16] = b"ZcashOutputsHash";
+const ZCASH_JOINSPLITS_HASH_PERSONALIZATION: &[u8; 16] = b"ZcashJSplitsHash";
+const ZCASH_SHIELDED_SPENDS_HASH_PERSONALIZATION: &[u8; 16] = b"ZcashSSpendsHash";
+const ZCASH_SHIELDED_OUTPUTS_HASH_PERSONALIZATION: &[u8; 16] = b"ZcashSOutputHash";
 
 pub const SIGHASH_ALL: u32 = 1;
 const SIGHASH_NONE: u32 = 2;
@@ -128,7 +128,7 @@ fn shielded_spends_hash(tx: &TransactionData) -> Blake2bHash {
     let mut data = Vec::with_capacity(tx.shielded_spends.len() * 384);
     for s_spend in &tx.shielded_spends {
         s_spend.cv.write(&mut data).unwrap();
-        s_spend.anchor.into_repr().write_le(&mut data).unwrap();
+        data.extend_from_slice(s_spend.anchor.to_repr().as_ref());
         data.extend_from_slice(&s_spend.nullifier);
         s_spend.rk.write(&mut data).unwrap();
         data.extend_from_slice(&s_spend.zkproof);
@@ -152,7 +152,7 @@ fn shielded_outputs_hash(tx: &TransactionData) -> Blake2bHash {
 
 pub fn signature_hash_data(
     tx: &TransactionData,
-    consensus_branch_id: u32,
+    consensus_branch_id: consensus::BranchId,
     hash_type: u32,
     transparent_input: Option<(usize, &Script, Amount)>,
 ) -> Vec<u8> {
@@ -162,7 +162,7 @@ pub fn signature_hash_data(
             let mut personal = [0; 16];
             (&mut personal[..12]).copy_from_slice(ZCASH_SIGHASH_PERSONALIZATION_PREFIX);
             (&mut personal[12..])
-                .write_u32::<LittleEndian>(consensus_branch_id)
+                .write_u32::<LittleEndian>(consensus_branch_id.into())
                 .unwrap();
 
             let mut h = Blake2bParams::new()
@@ -230,7 +230,7 @@ pub fn signature_hash_data(
 
 pub fn signature_hash(
     tx: &Transaction,
-    consensus_branch_id: u32,
+    consensus_branch_id: consensus::BranchId,
     hash_type: u32,
     transparent_input: Option<(usize, &Script, Amount)>,
 ) -> Vec<u8> {

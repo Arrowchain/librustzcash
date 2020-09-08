@@ -1,3 +1,5 @@
+//! Structs and methods for handling Zcash block headers.
+
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use hex;
 use sha2::{Digest, Sha256};
@@ -5,14 +7,16 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::ops::Deref;
 
-use serialize::Vector;
+use crate::serialize::Vector;
+
+pub mod equihash;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlockHash(pub [u8; 32]);
 
 impl fmt::Display for BlockHash {
-    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        let mut data = self.0.clone();
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut data = self.0;
         data.reverse();
         formatter.write_str(&hex::encode(data))
     }
